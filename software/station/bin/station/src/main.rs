@@ -139,6 +139,31 @@ fn validate_normfs_file_size(args: &Args) -> Result<(), io::Error> {
 /// Rejects the CLI value up front (clap fails `Args::parse()` with a clear
 /// message) rather than letting a typo'd `--static-path` silently fall back
 /// to embedded assets on every request.
+/// How long a restart will wait for the previous instance's port.
+const BIND_ATTEMPTS: u32 = 30;
+const BIND_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Binds once and keeps it. A port this process -- or the instance before
+/// it -- just closed can be refused for a moment on macOS, and a
+/// bind-then-drop check ahead of the real bind failed every other start on
+/// exactly that. A busy port is retried briefly instead.
+async fn bind_retrying<T, F, Fut>(what: &str, addr: SocketAddr, mut bind: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    for attempt in 1..=BIND_ATTEMPTS {
+        match bind().await {
+            Ok(bound) => return Ok(bound),
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse && attempt < BIND_ATTEMPTS => {
+                tokio::time::sleep(BIND_RETRY_INTERVAL).await;
+            }
+            Err(e) => return Err(format!("{what} port {} is busy: {e}", addr.port())),
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
 fn parse_existing_dir(s: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(s);
     if !path.is_dir() {
@@ -803,7 +828,10 @@ impl Station {
         &self,
         addr: SocketAddr,
     ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
-        let server = normfs::server::Server::new(addr, self.normfs.clone()).await?;
+        let server = bind_retrying("NormFS TCP", addr, || {
+            normfs::server::Server::new(addr, self.normfs.clone())
+        })
+        .await?;
         log::info!("NormFS server listening on {}", addr);
 
         Ok(tokio::spawn(async move {
@@ -900,10 +928,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .or_else(|_| format!("0.0.0.0:{}", tcp_addr_str).parse())
             .map_err(|e| format!("Invalid address '{}': {}", tcp_addr_str, e))?;
 
-        if let Err(e) = tokio::net::TcpListener::bind(tcp_addr).await {
-            panic!("NormFS TCP port {} is busy: {}", tcp_addr.port(), e);
-        }
-
         server_handle = Some(station.start_server(tcp_addr).await?);
     }
 
@@ -915,16 +939,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .or_else(|_| format!("0.0.0.0:{}", web_addr_str).parse())
             .map_err(|e| format!("Invalid address '{}': {}", web_addr_str, e))?;
 
-        if let Err(e) = tokio::net::TcpListener::bind(web_addr).await {
-            panic!("Web server port {} is busy: {}", web_addr.port(), e);
-        }
+        let listener = bind_retrying("Web server", web_addr, || {
+            tokio::net::TcpListener::bind(web_addr)
+        })
+        .await?;
 
         let normfs_clone = station.normfs.clone();
         let web_shutdown_clone = web_shutdown.clone();
         let static_path = args.static_path.clone();
         web_server_handle = Some(tokio::spawn(async move {
             if let Err(e) =
-                web::server::start_server(web_addr, normfs_clone, web_shutdown_clone, static_path)
+                web::server::start_server(listener, normfs_clone, web_shutdown_clone, static_path)
                     .await
             {
                 log::error!("Web server error: {}", e);
