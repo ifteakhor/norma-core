@@ -49,20 +49,25 @@ impl ShmWriter {
         let buffer_size = total_size / BUFFER_COUNT;
         let max_data_size = buffer_size - HEADER_SIZE;
 
+        let with_path = |e: std::io::Error| {
+            normfs::Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("inference shm {}: {e}", shm_path.display()),
+            ))
+        };
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(shm_path)
-            .map_err(|e| normfs::Error::Io(e))?;
+            .map_err(with_path)?;
 
-        file.set_len(total_size as u64)
-            .map_err(|e| normfs::Error::Io(e))?;
+        file.set_len(total_size as u64).map_err(with_path)?;
 
         log::info!("Starting inference shared memory writer at {:?} ({}MB, {} buffers, {} bytes per buffer)",
             shm_path, shm_size_mb, BUFFER_COUNT, max_data_size);
 
-        let mut mmap = unsafe { MmapMut::map_mut(&file).map_err(|e| normfs::Error::Io(e))? };
+        let mut mmap = unsafe { MmapMut::map_mut(&file).map_err(with_path)? };
 
         // Initialize all buffer headers with MAX sequence
         for i in 0..BUFFER_COUNT {
