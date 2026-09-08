@@ -5,6 +5,7 @@ use log::error;
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -17,6 +18,7 @@ use station_iface::StationEngine;
 
 pub struct CameraMacDriver {
     enabled: bool,
+    stopping: AtomicBool,
 }
 
 impl Default for CameraMacDriver {
@@ -28,7 +30,10 @@ impl Default for CameraMacDriver {
 impl CameraMacDriver {
     pub fn new() -> Self {
         let enabled = unsafe { ffi::requestCameraAccess() == 0 };
-        Self { enabled }
+        Self {
+            enabled,
+            stopping: AtomicBool::new(false),
+        }
     }
 }
 
@@ -184,6 +189,10 @@ impl USBCameraDriver for CameraMacDriver {
         let mut frame_index = 0;
         let mut last_frame_time = Instant::now();
         loop {
+            if self.stopping.load(Ordering::Acquire) {
+                log::info!("Capture for camera {} stopped", camera.unique_id);
+                break;
+            }
             let max_buffer_size = 1920 * 1080 * 4;
             let mut buffer = vec![0u8; max_buffer_size];
 
@@ -309,7 +318,9 @@ impl USBCameraDriver for CameraMacDriver {
         }
     }
 
-    async fn stop(&self) {}
+    async fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+    }
 }
 
 /// Process main run loop briefly to handle AVFoundation notifications

@@ -18,6 +18,7 @@ use station_iface::{
     try_enqueue_with,
 };
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 
 use crate::{
     converters,
@@ -29,6 +30,7 @@ use crate::{
 };
 
 pub const TX_QUEUE_ID: &str = "usbvideo/tx";
+const CAMERA_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct CaptureResult {
     pub has_frames: bool,
@@ -59,6 +61,9 @@ pub struct USBVideoManager<K: USBCameraDriver> {
     normfs: Arc<NormFS>,
     command_subscription: Mutex<Option<(normfs::QueueId, usize)>>,
     stopped: Arc<AtomicBool>,
+    /// One task per connected camera. `stop` waits for them so the disconnect
+    /// record and the queue close land before NormFS closes.
+    cameras: Arc<Mutex<JoinSet<()>>>,
 }
 
 impl<K: USBCameraDriver> USBVideoManager<K> {
@@ -114,8 +119,10 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
             }
         };
 
+        let cameras = Arc::new(Mutex::new(JoinSet::new()));
+        let watch_cameras = cameras.clone();
         tokio::spawn(async move {
-            Self::watch_cameras(worker_stopped, driver_arc, state4run).await;
+            Self::watch_cameras(worker_stopped, driver_arc, state4run, watch_cameras).await;
         });
 
         Self {
@@ -123,6 +130,7 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
             normfs,
             command_subscription: Mutex::new(command_subscription),
             stopped,
+            cameras,
         }
     }
 
@@ -442,6 +450,7 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
         stopped: Arc<AtomicBool>,
         driver: Arc<K>,
         tracker: Arc<StateTracker<T>>,
+        tasks: Arc<Mutex<JoinSet<()>>>,
     ) {
         let known_cameras = Arc::new(RwLock::new(HashSet::<String>::new()));
 
@@ -471,7 +480,7 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
                 let cam_known = known_cameras.clone();
                 let cam_stopped = stopped.clone();
 
-                tokio::spawn(async move {
+                tasks.lock().spawn(async move {
                     let queue_id_str = USBVideoManager::<K>::generate_queue_id(&camera.unique_id);
                     let queue_id = cam_tracker.resolve_queue_id(&queue_id_str);
                     let mut queue_started = false;
@@ -677,6 +686,18 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
             self.normfs.unsubscribe(&queue_id, subscription_id);
         }
         self.driver.stop().await;
+
+        let mut cameras = std::mem::take(&mut *self.cameras.lock());
+        let drained = tokio::time::timeout(CAMERA_STOP_TIMEOUT, async {
+            while cameras.join_next().await.is_some() {}
+        })
+        .await;
+        if drained.is_err() {
+            warn!(
+                "Camera tasks did not finish within {:?}",
+                CAMERA_STOP_TIMEOUT
+            );
+        }
     }
 }
 
