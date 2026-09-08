@@ -100,9 +100,7 @@ impl VescTrampaDriver {
                                 motor_mode: command.motor_mode,
                             };
 
-                            if let Err(error) = com4commands.send_tx(&envelope) {
-                                error!("Failed to send VESC Trampa command to tx queue: {}", error);
-                            }
+                            com4commands.send_tx(&envelope);
                         }
                     }
                 }

@@ -7,8 +7,8 @@ use i2c_async::AsyncI2cDevice;
 use log::{error, info, warn};
 use normfs::NormFS;
 use prost::Message;
-use station_iface::StationEngine;
 use station_iface::iface_proto::drivers::QueueDataType;
+use station_iface::{Backpressure, StationEngine, enqueue_with};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -259,15 +259,13 @@ async fn send_board_signal(
 
     // A register snapshot arrives every poll tick; the board coming, going or
     // faulting happens once.
-    let sent =
+    let policy =
         if signal_type == ArduinoNiclaSenseEnvSignalType::ArduinoNiclaSenseEnvRegistersSnapshot {
-            normfs.try_enqueue(queue_id, data).map(|_| ())
+            Backpressure::Skip
         } else {
-            normfs.enqueue(queue_id, data).await.map(|_| ())
+            Backpressure::Keep
         };
-    if let Err(error) = sent
-        && !matches!(error, normfs::Error::WouldBlock)
-    {
+    if let Err(error) = enqueue_with(normfs, queue_id, data, policy).await {
         error!(
             "Failed to send Arduino Nicla Sense Env {:?} signal for {}: {}",
             signal_type, board.id, error

@@ -15,6 +15,7 @@ use normfs::NormFS;
 use parking_lot::RwLock;
 use prost::Message;
 use station_iface::iface_proto::commands::{DriverCommand, StationCommandsPack};
+use station_iface::{Backpressure, enqueue_with};
 use std::sync::Arc;
 
 /// Maximum acceptable data age before considering it stale (100ms in nanoseconds)
@@ -551,14 +552,12 @@ impl Inference {
         }
 
         let data = Bytes::from(pack.encode_to_vec());
-        let sent = if keep {
-            normfs.enqueue(commands_queue_id, data).await.map(|_| ())
+        let policy = if keep {
+            Backpressure::Keep
         } else {
-            normfs.try_enqueue(commands_queue_id, data).map(|_| ())
+            Backpressure::Skip
         };
-        if let Err(e) = sent
-            && !matches!(e, normfs::Error::WouldBlock)
-        {
+        if let Err(e) = enqueue_with(normfs, commands_queue_id, data, policy).await {
             log::error!("Failed to publish mirroring commands: {e}");
         }
     }

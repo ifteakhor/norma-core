@@ -77,13 +77,11 @@ impl VescTrampaCommunicator {
         Ok(())
     }
 
-    pub fn send_tx(
-        &self,
-        envelope: &crate::vesc_trampa_proto::TxEnvelope,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Never fails and never waits: the writer task reports what it could not
+    /// place.
+    pub fn send_tx(&self, envelope: &crate::vesc_trampa_proto::TxEnvelope) {
         self.tx_writer
             .write(Self::encode(envelope), Backpressure::Keep);
-        Ok(())
     }
 
     fn update_state(&self, envelope: &vesc_trampa_proto::RxEnvelope, ptr: UintN) {

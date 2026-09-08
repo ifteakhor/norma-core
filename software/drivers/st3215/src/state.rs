@@ -200,13 +200,11 @@ impl ST3215BusCommunicator {
         Ok(())
     }
 
-    pub fn send_tx(
-        &self,
-        envelope: &st3215_proto::TxEnvelope,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Never fails and never waits: the writer task reports what it could not
+    /// place.
+    pub fn send_tx(&self, envelope: &st3215_proto::TxEnvelope) {
         self.tx_writer
             .write(Self::encode(envelope), Backpressure::Keep);
-        Ok(())
     }
 
     pub async fn send_meta(
@@ -378,13 +376,7 @@ impl ST3215BusCommunicator {
             let mut state = self.state.write();
             state.state.last_inference_queue_ptr = self.get_last_inference_id_bytes();
         }
-        let state = self.state.read();
-        let mut buf = Vec::new();
-        state.state.encode(&mut buf).unwrap();
-
-        let _ = self
-            .normfs
-            .try_enqueue(&self.inference_queue_id, Bytes::from(buf));
+        self.publish_inference_state();
     }
 
     pub fn reset_bounds(&self, bus_serial: &str) {

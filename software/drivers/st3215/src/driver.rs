@@ -101,9 +101,7 @@ impl St3215Driver {
                                 sync_write: command.sync_write,
                             };
 
-                            if let Err(e) = com4commands.send_tx(&envelope) {
-                                error!("Failed to send ST3215 command to tx queue: {}", e);
-                            }
+                            com4commands.send_tx(&envelope);
                         }
                     }
                 }

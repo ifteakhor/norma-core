@@ -7,8 +7,8 @@ use bytes::Bytes;
 use log::{debug, error, info};
 use normfs::NormFS;
 use prost::Message;
-use station_iface::StationEngine;
 use station_iface::iface_proto::drivers::QueueDataType;
+use station_iface::{Backpressure, StationEngine, enqueue_with};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -105,9 +105,10 @@ impl<T: StationEngine> VictronPort<T> {
             &rx_queue_id,
             &device,
             VictronSignalType::VictronConnected,
-            Some(&probe_block),
-            None,
-            Vec::new(),
+            Payload {
+                text: Some(&probe_block),
+                ..Payload::default()
+            },
             String::new(),
         )
         .await;
@@ -115,9 +116,10 @@ impl<T: StationEngine> VictronPort<T> {
             &rx_queue_id,
             &device,
             VictronSignalType::VictronTextBlock,
-            Some(&probe_block),
-            None,
-            Vec::new(),
+            Payload {
+                text: Some(&probe_block),
+                ..Payload::default()
+            },
             String::new(),
         )
         .await;
@@ -144,9 +146,7 @@ impl<T: StationEngine> VictronPort<T> {
             &rx_queue_id,
             &device,
             VictronSignalType::VictronDisconnected,
-            None,
-            None,
-            Vec::new(),
+            Payload::default(),
             reason,
         )
         .await;
@@ -290,9 +290,11 @@ impl<T: StationEngine> VictronPort<T> {
                             rx_queue_id,
                             device,
                             VictronSignalType::VictronTextBlock,
-                            last_text.as_deref(),
-                            None,
-                            regs.values().cloned().collect(),
+                            Payload {
+                                text: last_text.as_deref(),
+                                hex_frames: regs.values().cloned().collect(),
+                                ..Payload::default()
+                            },
                             String::new(),
                         )
                         .await;
@@ -311,9 +313,11 @@ impl<T: StationEngine> VictronPort<T> {
                             rx_queue_id,
                             device,
                             VictronSignalType::VictronHexFrame,
-                            last_text.as_deref(),
-                            Some(frame),
-                            regs.values().cloned().collect(),
+                            Payload {
+                                text: last_text.as_deref(),
+                                hex_frame: Some(frame),
+                                hex_frames: regs.values().cloned().collect(),
+                            },
                             String::new(),
                         )
                         .await;
@@ -330,9 +334,7 @@ impl<T: StationEngine> VictronPort<T> {
                     rx_queue_id,
                     device,
                     VictronSignalType::VictronError,
-                    None,
-                    None,
-                    Vec::new(),
+                    Payload::default(),
                     format!("no valid VE.Direct frame for {:?}", last_valid.elapsed()),
                 )
                 .await;
@@ -346,9 +348,7 @@ impl<T: StationEngine> VictronPort<T> {
         rx_queue_id: &normfs::QueueId,
         device: &VictronDevice,
         signal_type: VictronSignalType,
-        data: Option<&[u8]>,
-        hex_frame: Option<Bytes>,
-        hex_frames: Vec<Bytes>,
+        payload: Payload<'_>,
         error: String,
     ) {
         let envelope = RxEnvelope {
@@ -357,9 +357,9 @@ impl<T: StationEngine> VictronPort<T> {
             app_start_id: systime::get_app_start_id(),
             signal_type: signal_type as i32,
             device: Some(device.clone()),
-            data: data.map(Bytes::copy_from_slice).unwrap_or_default(),
-            hex_frame: hex_frame.unwrap_or_default(),
-            hex_frames,
+            data: payload.text.map(Bytes::copy_from_slice).unwrap_or_default(),
+            hex_frame: payload.hex_frame.unwrap_or_default(),
+            hex_frames: payload.hex_frames,
             error,
         };
 
@@ -370,25 +370,28 @@ impl<T: StationEngine> VictronPort<T> {
         }
         // Text blocks and hex frames are a stream; connect, disconnect and
         // error happen once.
-        let sent = if matches!(
+        let policy = if matches!(
             signal_type,
             VictronSignalType::VictronTextBlock | VictronSignalType::VictronHexFrame
         ) {
-            self.normfs
-                .try_enqueue(rx_queue_id, Bytes::from(buffer))
-                .map(|_| ())
+            Backpressure::Skip
         } else {
-            self.normfs
-                .enqueue(rx_queue_id, Bytes::from(buffer))
-                .await
-                .map(|_| ())
+            Backpressure::Keep
         };
-        if let Err(err) = sent
-            && !matches!(err, normfs::Error::WouldBlock)
+        if let Err(err) = enqueue_with(&self.normfs, rx_queue_id, Bytes::from(buffer), policy).await
         {
             error!("Failed to enqueue Victron SmartSolar MPPT envelope: {err}");
         }
     }
+}
+
+/// What a record carries besides its signal: the last text block, the hex
+/// frame that arrived, and the register snapshot so far.
+#[derive(Default)]
+struct Payload<'a> {
+    text: Option<&'a [u8]>,
+    hex_frame: Option<Bytes>,
+    hex_frames: Vec<Bytes>,
 }
 
 enum ProbeOutcome {

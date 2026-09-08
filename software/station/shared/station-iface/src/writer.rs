@@ -7,10 +7,15 @@
 //! while the source queue holds its append gate, so blocking one stalls
 //! command ingestion for everybody.
 //!
-//! So no station code awaits `enqueue`. Each queue gets one writer task that
-//! owns the only `enqueue` running for it, reached through a bounded channel
-//! and a `try_send` that never blocks. Back-pressure arrives as a full
-//! channel.
+//! Two ways in, and a queue uses one of them, never both:
+//!
+//! - A producer on its own async task calls [`enqueue_with`], which decides
+//!   per record whether to wait (bounded by [`WRITE_TIMEOUT`]) or to refuse
+//!   without waiting.
+//! - A producer that cannot wait at all gets a [`QueueWriter`]: one writer
+//!   task owns the only `enqueue` running for that queue, reached through a
+//!   bounded channel and a `try_send` that never blocks. Back-pressure
+//!   arrives as a full channel.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +49,43 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 pub enum Backpressure {
     Keep,
     Skip,
+}
+
+/// Writes one record straight into NormFS from an async task that owns no
+/// [`QueueWriter`] for the queue.
+///
+/// [`Backpressure::Skip`] refuses rather than waits, and a full queue is not
+/// an error: the caller's next record says the same thing. [`Backpressure::Keep`]
+/// waits for a page, but no longer than [`WRITE_TIMEOUT`], so a stalled disk
+/// costs the caller a logged loss rather than a frozen task.
+///
+/// Errors other than a full queue are returned for the caller to log with
+/// whatever context it has.
+pub async fn enqueue_with(
+    normfs: &NormFS,
+    queue_id: &QueueId,
+    data: Bytes,
+    policy: Backpressure,
+) -> Result<(), normfs::Error> {
+    match policy {
+        Backpressure::Skip => match normfs.try_enqueue(queue_id, data) {
+            Ok(_) | Err(normfs::Error::WouldBlock) => Ok(()),
+            Err(e) => Err(e),
+        },
+        Backpressure::Keep => {
+            match tokio::time::timeout(WRITE_TIMEOUT, normfs.enqueue(queue_id, data)).await {
+                Ok(outcome) => outcome.map(|_| ()),
+                Err(_) => Err(timed_out()),
+            }
+        }
+    }
+}
+
+fn timed_out() -> normfs::Error {
+    normfs::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "no page became free in time",
+    ))
 }
 
 struct Record {
@@ -235,10 +277,7 @@ async fn write_one(
                 "queue '{queue_id}' had no room for a {len} byte record within {wait:?}; \
                  the record is lost and the station carries on"
             );
-            Err(normfs::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "no page became free in time",
-            )))
+            Err(timed_out())
         }
     }
 }

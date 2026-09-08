@@ -173,7 +173,7 @@ impl St3215PortMeta {
                         freezed = false;
                         log::info!(
                             "Resetting calibration for all motors on bus '{}'",
-                            &target_serial
+                            target_serial
                         );
 
                         // Stop any ongoing calibration
@@ -181,7 +181,7 @@ impl St3215PortMeta {
                             stop_flag.store(true, Ordering::Relaxed);
                             log::info!(
                                 "Stopping ongoing calibration for reset on bus '{}'",
-                                &target_serial
+                                target_serial
                             );
                         }
 
@@ -209,7 +209,7 @@ impl St3215PortMeta {
                         freezed = true;
                         log::info!(
                             "Freezing calibration for all motors on bus '{}'",
-                            &target_serial
+                            target_serial
                         );
 
                         let freeze_cmd = command.freeze_calibration.as_ref().unwrap();
@@ -348,20 +348,20 @@ impl St3215PortMeta {
                     if signal_is_cmd && command.stop_auto_calibrate.is_some() {
                         log::info!(
                             "Stop auto-calibration command received for bus '{}'",
-                            &target_serial
+                            target_serial
                         );
                         if let Some(stop_flag) = comm.get_calibration_stop(&target_serial) {
                             stop_flag.store(true, Ordering::Relaxed);
                             log::info!(
                                 "Auto-calibration stop flag set for bus '{}'",
-                                &target_serial
+                                target_serial
                             );
                             // Clean up the stop flag from storage
                             comm.clear_calibration_stop(&target_serial);
                         } else {
                             log::warn!(
                                 "No active auto-calibration found for bus '{}'",
-                                &target_serial
+                                target_serial
                             );
                         }
                         continue;

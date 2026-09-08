@@ -8,7 +8,7 @@ use normfs::NormFS;
 use parking_lot::Mutex;
 use prost::Message;
 use station_iface::iface_proto::{commands, drivers};
-use station_iface::{Backpressure, QueueWriter, StationEngine};
+use station_iface::{Backpressure, QueueWriter, STARTUP_WRITE_TIMEOUT, StationEngine};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -83,14 +83,21 @@ impl PwmOutputDriver {
             }
 
             let runtime = OutputRuntime::new(output_config);
-            send_rx(
-                &rx_writer,
+            // A startup record: nothing later repeats it, and there may be
+            // more of them than the writer's channel holds.
+            if let Some(data) = rx_envelope(
                 PwmOutputSignalType::PwmOutputConfigured,
                 Some(runtime.device_proto()),
                 Some(runtime.state.clone()),
                 None,
                 None,
-            );
+            ) && let Err(error) = rx_writer.write_awaiting(data, STARTUP_WRITE_TIMEOUT).await
+            {
+                error!(
+                    "Failed to record PWM output '{}' as configured: {}",
+                    runtime.config.id, error
+                );
+            }
             outputs.insert(runtime.config.id.clone(), runtime);
         }
 
@@ -282,6 +289,19 @@ fn send_rx(
     command: Option<TxEnvelope>,
     error_message: Option<String>,
 ) {
+    if let Some(data) = rx_envelope(signal_type, device, state, command, error_message) {
+        writer.write(data, Backpressure::Keep);
+    }
+}
+
+/// The encoded RX record, or `None` after logging why it could not be built.
+fn rx_envelope(
+    signal_type: PwmOutputSignalType,
+    device: Option<PwmOutputDevice>,
+    state: Option<OutputState>,
+    command: Option<TxEnvelope>,
+    error_message: Option<String>,
+) -> Option<Bytes> {
     let envelope = RxEnvelope {
         monotonic_stamp_ns: systime::get_monotonic_stamp_ns(),
         local_stamp_ns: systime::get_local_stamp_ns(),
@@ -296,9 +316,9 @@ fn send_rx(
     let mut buf = Vec::new();
     if let Err(error) = envelope.encode(&mut buf) {
         error!("Failed to encode PWM output RX envelope: {}", error);
-        return;
+        return None;
     }
-    writer.write(Bytes::from(buf), Backpressure::Keep);
+    Some(Bytes::from(buf))
 }
 
 impl OutputRuntime {

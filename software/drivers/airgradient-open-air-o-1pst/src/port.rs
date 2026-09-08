@@ -7,8 +7,8 @@ use bytes::Bytes;
 use log::{debug, error, info};
 use normfs::NormFS;
 use prost::Message;
-use station_iface::StationEngine;
 use station_iface::iface_proto::drivers::QueueDataType;
+use station_iface::{Backpressure, StationEngine, enqueue_with};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -189,20 +189,13 @@ impl<T: StationEngine> AirGradientPort<T> {
             );
             return;
         }
-        // A measurement is one of a stream; connect, disconnect and error
-        // happen once.
-        let sent = if signal_type == AirGradientSignalType::AirgradientMeasurement {
-            self.normfs
-                .try_enqueue(rx_queue_id, Bytes::from(buffer))
-                .map(|_| ())
+        // A measurement is one of a stream; connect and disconnect happen once.
+        let policy = if signal_type == AirGradientSignalType::AirgradientMeasurement {
+            Backpressure::Skip
         } else {
-            self.normfs
-                .enqueue(rx_queue_id, Bytes::from(buffer))
-                .await
-                .map(|_| ())
+            Backpressure::Keep
         };
-        if let Err(err) = sent
-            && !matches!(err, normfs::Error::WouldBlock)
+        if let Err(err) = enqueue_with(&self.normfs, rx_queue_id, Bytes::from(buffer), policy).await
         {
             error!(
                 "Failed to enqueue AirGradient Open Air O-1PST envelope: {}",
