@@ -157,7 +157,7 @@ fn merge_modes(
             command,
         };
 
-        // Also reached from the commands subscriber callback, so this cannot wait.
+        // May run inside the commands subscriber callback; must not block.
         if let Err(e) = try_enqueue_with(normfs, rx_queue_id, rx_envelope.encode_to_vec().into(), Backpressure::Keep) {
             log::error!("Failed to publish mirroring state: {}", e);
         }

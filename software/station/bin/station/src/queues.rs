@@ -29,7 +29,7 @@ impl MainQueue {
         })
     }
 
-    /// Says which run every later record belongs to.
+    /// Publishes the app-start record that identifies this run.
     pub async fn send_app_start(&self) -> Result<()> {
         let envelope = self.create_envelope(RootQueueEnvelopeType::RqetAppStart, None);
         let mut buf = Vec::new();
@@ -76,8 +76,7 @@ impl MainQueue {
         }
     }
 
-    /// Registrations arrive through a synchronous trait method, so this
-    /// cannot wait.
+    /// Called from the synchronous `register_queue`; must not block.
     fn send_envelope(&self, envelope: RootQueueEnvelope) -> Result<()> {
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;

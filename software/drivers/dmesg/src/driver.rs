@@ -15,7 +15,7 @@ pub const QUEUE_ID: &str = "dmesg/rx";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RECORDS_PER_ENVELOPE: usize = 512;
-/// Under the 256 KiB page, with room for the envelope around the records.
+/// Keeps an envelope under the 256 KiB page limit.
 const MAX_BYTES_PER_ENVELOPE: usize = 192 * 1024;
 const MAX_RECORDS_PER_SECOND: u32 = 200;
 const RESUME_SCAN_ENTRIES: u64 = 32;
@@ -97,8 +97,7 @@ pub async fn start_dmesg_driver<T: StationEngine>(
 struct Publisher {
     normfs: Arc<NormFS>,
     queue_id: QueueId,
-    /// This runs on the dmesg thread, not a runtime worker, so it is allowed
-    /// to block on a write that has to wait.
+    /// Used to block on writes from the dmesg thread, which is not a runtime worker.
     runtime: tokio::runtime::Handle,
 }
 
@@ -111,8 +110,7 @@ impl Publisher {
             return;
         }
 
-        // Diagnostics matter most when the disk is in trouble, so this
-        // waits -- bounded, so a wedged queue cannot pin the dmesg thread.
+        // Wait for a free page, but not indefinitely.
         let sent = self.runtime.block_on(tokio::time::timeout(
             WRITE_TIMEOUT,
             self.normfs.enqueue(&self.queue_id, Bytes::from(buffer)),
@@ -329,12 +327,12 @@ fn publish_backlog(
     }
 }
 
-/// Whether one more record of `next_len` bytes still fits the envelope.
+/// Returns true if one more record of `next_len` bytes fits the envelope.
 fn fits_envelope(count: usize, bytes: usize, next_len: usize) -> bool {
     count < MAX_RECORDS_PER_ENVELOPE && bytes + next_len <= MAX_BYTES_PER_ENVELOPE
 }
 
-/// Runs of records that each fit one envelope, by count and by bytes.
+/// Splits records into chunks that each fit one envelope, by count and by bytes.
 fn envelope_chunks(records: &[String]) -> Vec<&[String]> {
     let mut chunks = Vec::new();
     let mut start = 0;

@@ -368,8 +368,7 @@ impl<T: StationEngine> VictronPort<T> {
             error!("Failed to encode Victron SmartSolar MPPT envelope: {err}");
             return;
         }
-        // Text blocks and hex frames are a stream; connect, disconnect and
-        // error happen once.
+        // Text blocks and hex frames are a stream; connect/disconnect/error must not be dropped.
         let policy = if matches!(
             signal_type,
             VictronSignalType::VictronTextBlock | VictronSignalType::VictronHexFrame
@@ -385,8 +384,7 @@ impl<T: StationEngine> VictronPort<T> {
     }
 }
 
-/// What a record carries besides its signal: the last text block, the hex
-/// frame that arrived, and the register snapshot so far.
+/// Optional record contents: the last text block, the hex frame, and the register snapshot.
 #[derive(Default)]
 struct Payload<'a> {
     text: Option<&'a [u8]>,

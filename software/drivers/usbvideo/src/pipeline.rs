@@ -679,7 +679,7 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
     }
 }
 
-/// Runs inside the commands subscriber callback, so it cannot wait.
+/// Called from the commands subscriber callback; must not block.
 fn send_tx(normfs: &NormFS, tx_queue_id: &normfs::QueueId, envelope: &TxEnvelope) {
     let mut buf = BytesMut::new();
     envelope.encode(&mut buf).unwrap();

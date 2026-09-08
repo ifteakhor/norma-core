@@ -257,8 +257,7 @@ async fn send_board_signal(
     }
     let data = Bytes::from(buffer);
 
-    // A register snapshot arrives every poll tick; the board coming, going or
-    // faulting happens once.
+    // Snapshots are periodic; connect/disconnect/error must not be dropped.
     let policy =
         if signal_type == ArduinoNiclaSenseEnvSignalType::ArduinoNiclaSenseEnvRegistersSnapshot {
             Backpressure::Skip

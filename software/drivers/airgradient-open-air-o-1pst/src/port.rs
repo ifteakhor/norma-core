@@ -189,7 +189,7 @@ impl<T: StationEngine> AirGradientPort<T> {
             );
             return;
         }
-        // A measurement is one of a stream; connect and disconnect happen once.
+        // Measurements are a stream; connect/disconnect must not be dropped.
         let policy = if signal_type == AirGradientSignalType::AirgradientMeasurement {
             Backpressure::Skip
         } else {

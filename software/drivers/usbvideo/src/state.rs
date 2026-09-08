@@ -232,8 +232,7 @@ impl<T: StationEngine> StateTracker<T> {
 
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        // The capture thread must not park: a full queue is a skip, anything
-        // else would silence the camera and is worth a line.
+        // Must not block the capture thread. A full queue is expected; other errors are logged.
         if let Err(e) = self.normfs.try_enqueue(queue_id, buf.freeze())
             && !matches!(e, normfs::Error::WouldBlock)
         {

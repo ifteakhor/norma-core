@@ -51,9 +51,7 @@ impl VescTrampaCommunicator {
         Bytes::from(envelope_buf)
     }
 
-    /// The caller decides: a board packet is skippable when the next tick
-    /// replaces it, not when it answers a command. A skipped record leaves
-    /// the inference state untouched.
+    /// A skipped record does not update the inference state.
     pub async fn send_rx(
         &self,
         envelope: &crate::vesc_trampa_proto::RxEnvelope,
@@ -76,7 +74,7 @@ impl VescTrampaCommunicator {
         Ok(())
     }
 
-    /// Runs inside the commands subscriber callback, so it cannot wait.
+    /// Called from the commands subscriber callback; must not block.
     pub fn send_tx(&self, envelope: &crate::vesc_trampa_proto::TxEnvelope) {
         if let Err(e) = try_enqueue_with(
             &self.normfs,
@@ -267,7 +265,7 @@ impl VescTrampaCommunicator {
         }
     }
 
-    /// The snapshot is kept or skipped with the rx record it follows.
+    /// Uses the policy of the rx record that triggered the update.
     async fn publish_inference_state(&self, policy: Backpressure) {
         let mut buf = Vec::new();
         self.state.read().state.encode(&mut buf).unwrap();

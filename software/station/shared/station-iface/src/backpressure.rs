@@ -1,15 +1,15 @@
-//! Writing into NormFS from the station.
+//! Enqueue helpers with an explicit backpressure policy.
 //!
-//! `NormFS::enqueue` waits for a free page; `try_enqueue` refuses instead.
-//! Which one a record gets is a property of the record, not of the queue:
-//! a frame, a telemetry sample or a state snapshot is replaced by the next
-//! one and may be skipped, while a connect, a disconnect, a registration or
-//! a command echo is said once and is kept.
+//! `NormFS::enqueue` waits for a free page; `try_enqueue` returns
+//! `WouldBlock` instead. The policy is chosen per record: periodic data
+//! (frames, telemetry, state snapshots) is superseded by the next record and
+//! may be skipped, while one-off records (connect, disconnect, registrations,
+//! command echoes) must be kept.
 //!
-//! A kept record waits only where the caller can. An async task awaits it,
-//! bounded by [`WRITE_TIMEOUT`]. A subscriber callback runs while its queue
-//! holds the append gate, and a capture thread has the next frame on the
-//! way, so those try once and log a refusal.
+//! Kept records wait only where the caller can. Async tasks await with a
+//! timeout. Subscriber callbacks run while the source queue holds its append
+//! gate, and capture threads must not stall, so those try once and log a
+//! refusal.
 
 use std::time::Duration;
 
@@ -18,19 +18,19 @@ use normfs::{NormFS, QueueId};
 
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Nothing can be read without the startup records, so they get more patience.
+/// Startup records get a longer timeout: nothing can be read without them.
 pub const STARTUP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// What a full queue means for this record.
+/// What to do when the queue has no free page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backpressure {
-    /// Nothing later repeats it: wait if the caller can, report if it cannot.
+    /// Wait if possible; otherwise report the drop.
     Keep,
-    /// The next one supersedes it: a full queue is not an error.
+    /// Drop silently; the next record supersedes this one.
     Skip,
 }
 
-/// From an async task. `Keep` waits up to [`WRITE_TIMEOUT`].
+/// Enqueues from an async context. `Keep` waits up to [`WRITE_TIMEOUT`].
 pub async fn enqueue_with(
     normfs: &NormFS,
     queue_id: &QueueId,
@@ -43,7 +43,7 @@ pub async fn enqueue_with(
     }
 }
 
-/// From an async task, waiting up to `wait` for a page.
+/// Enqueues from an async context, waiting up to `wait` for a free page.
 pub async fn enqueue_waiting(
     normfs: &NormFS,
     queue_id: &QueueId,
@@ -59,8 +59,8 @@ pub async fn enqueue_waiting(
     }
 }
 
-/// From a place that cannot wait. A full queue is `Ok` for `Skip` and
-/// `Err(WouldBlock)` for `Keep`, so the caller can say what was lost.
+/// Enqueues without waiting. A full queue is `Ok(())` for `Skip` and
+/// `Err(WouldBlock)` for `Keep`.
 pub fn try_enqueue_with(
     normfs: &NormFS,
     queue_id: &QueueId,

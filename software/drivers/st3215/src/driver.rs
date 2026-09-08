@@ -144,8 +144,8 @@ impl St3215Driver {
                     .filter(|port| Self::is_st3215_device(port) && Self::can_use_port(port))
                     .collect();
 
-                // Only this task adds ports, so a snapshot decides. The lock
-                // is not held across the opens and awaited writes below.
+                // Only this task adds ports, so a snapshot of the set is sufficient. The lock must
+                // not be held across the awaits below.
                 let known = ports.read().await.clone();
 
                 for port_info in st3215_ports {

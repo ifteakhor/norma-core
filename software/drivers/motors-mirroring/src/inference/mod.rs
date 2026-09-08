@@ -146,7 +146,7 @@ impl Inference {
                             command: MotorCommand::Torque(0),
                         });
                     }
-                    // A bus left torqued stays torqued.
+                    // Must not be dropped: the bus would stay torqued.
                     Self::send_st3215_commands(
                         &normfs,
                         &commands_queue_id,
@@ -379,7 +379,8 @@ impl Inference {
                 );
             }
             if !commands.is_empty() {
-                // Each pack carries the whole goal state.
+                // Each pack carries the full goal state, so a dropped pack is superseded by the
+                // next.
                 Self::send_st3215_commands(
                     normfs,
                     commands_queue_id,

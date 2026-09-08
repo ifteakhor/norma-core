@@ -303,7 +303,7 @@ impl VescTrampaPort {
                 );
 
                 self.values = Some(values);
-                // The next 20 ms tick brings a fresh one.
+                // Superseded by the next tick.
                 self.send_board_packet_signal(&source_packet, Backpressure::Skip)
                     .await?;
             }
@@ -413,7 +413,7 @@ impl VescTrampaPort {
                 )
                 .into());
             }
-            // The only answer this command will get.
+            // The command's only response; must not be dropped.
             self.send_board_packet_signal(&response_packet, Backpressure::Keep)
                 .await?;
             return Ok(CommandProcessResult {

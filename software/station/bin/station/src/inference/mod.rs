@@ -23,8 +23,8 @@ pub struct Inference {
     signal: InferenceSignal,
 }
 
-/// Dropping the runtime waits for `spawn_blocking` threads, so an early
-/// error out of `main` must not leave the worker parked on the condvar.
+/// Stops the worker on drop. Dropping the runtime waits for `spawn_blocking` threads, so an early
+/// error in `main` would otherwise hang.
 impl Drop for Inference {
     fn drop(&mut self) {
         self.shutdown();
@@ -53,7 +53,7 @@ impl Inference {
         Ok(())
     }
 
-    /// Names the run, so nothing else can be read without it.
+    /// Publishes the startup record that identifies this run.
     async fn notify_startup(normfs: &Arc<NormFS>) -> Result<(), normfs::Error> {
         let inference_queue_id = normfs.resolve(QUEUE_ID);
         let inference_queue_ptr = match normfs.get_last_id(&inference_queue_id) {
@@ -111,7 +111,7 @@ impl Inference {
                     cvar.wait(&mut signaled);
                 }
 
-                // A sent signal or a dropped sender both mean stop.
+                // Stop on an explicit signal or when the sender is dropped.
                 if !matches!(
                     shutdown_rx.try_recv(),
                     Err(mpsc::error::TryRecvError::Empty)
@@ -144,7 +144,7 @@ impl Inference {
                         app_start_id: systime::get_app_start_id(),
                     };
 
-                    // The next signal rebuilds the snapshot.
+                    // Skip on a full queue; the next signal republishes.
                     if let Err(e) =
                         worker_normfs.try_enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec()))
                         && !matches!(e, normfs::Error::WouldBlock)

@@ -54,7 +54,7 @@ pub async fn start(normfs: Arc<NormFS>) -> Result<(), normfs::Error> {
     Ok(())
 }
 
-/// Runs inside a subscriber callback, so it cannot wait.
+/// Called from a subscriber callback; must not block.
 fn publish(
     normfs: &NormFS,
     queue_id: &normfs::QueueId,

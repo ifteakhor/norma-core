@@ -139,14 +139,12 @@ fn validate_normfs_file_size(args: &Args) -> Result<(), io::Error> {
 /// Rejects the CLI value up front (clap fails `Args::parse()` with a clear
 /// message) rather than letting a typo'd `--static-path` silently fall back
 /// to embedded assets on every request.
-/// How long a restart will wait for the previous instance's port.
+/// Retry budget for binding a port still held by a previous instance.
 const BIND_ATTEMPTS: u32 = 30;
 const BIND_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Binds once and keeps it. A port this process -- or the instance before
-/// it -- just closed can be refused for a moment on macOS, and a
-/// bind-then-drop check ahead of the real bind failed every other start on
-/// exactly that. A busy port is retried briefly instead.
+/// Binds with a short retry on `AddrInUse`. On macOS a port that was just closed, by this process
+/// or a previous instance, can be refused briefly.
 async fn bind_retrying<T, F, Fut>(what: &str, addr: SocketAddr, mut bind: F) -> Result<T, String>
 where
     F: FnMut() -> Fut,
@@ -200,15 +198,13 @@ struct Engine {
     inference: Mutex<Option<inference::Inference>>,
 }
 
-/// Split out so the queue-name-to-pool mapping can be tested: getting it
-/// wrong does not fail a build, it fails a write at runtime.
+/// Kept separate so the queue-to-pool mapping can be unit tested.
 fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
-    // Rules match the absolute queue id, "/<instance_id>/<path>", so every
-    // pattern needs a leading `*`; "hikmicro-thermal/*" matches nothing.
+    // Rules are matched against the absolute queue id `/<instance_id>/<path>`, so every pattern
+    // needs a leading `*`.
     //
-    // The pool sets the page size, and the page size is the widest record the
-    // queue accepts: 256 KiB active against 32 KiB passive. A queue writing
-    // wider records than its pool allows has them refused outright.
+    // The pool determines the page size, and a record larger than one page is rejected: 256 KiB for
+    // active, 32 KiB for passive.
     let active = |compression_type, enable_fsync| QueueConfig {
         compression_type,
         enable_fsync,
@@ -378,7 +374,7 @@ impl Station {
     async fn start_main_queue(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let main_queue =
             MainQueue::new(self.normfs.clone(), self.normfs.get_instance_id_bytes()).await?;
-        // Loud, not fatal.
+        // Not fatal.
         if let Err(e) = main_queue.send_app_start().await {
             log::error!("Failed to record the app start: {}", e);
         }
@@ -1052,7 +1048,7 @@ mod tests {
         }
     }
 
-    /// The bug this replaced: the rule silently applied to nothing.
+    /// Regression test: a rule without a leading `*` never matches an absolute id.
     #[test]
     fn a_rule_without_a_leading_star_matches_no_absolute_id() {
         let settings = QueueSettings::new(

@@ -284,7 +284,7 @@ fn process_command(
     }
 }
 
-/// Both run inside the commands subscriber callback, so neither can wait.
+/// Both run inside the commands subscriber callback and must not block.
 fn send_tx(
     normfs: &NormFS,
     tx_queue_id: &normfs::QueueId,
@@ -312,7 +312,7 @@ fn send_rx(
     }
 }
 
-/// The encoded RX record, or `None` after logging why it could not be built.
+/// Encodes the RX envelope; logs and returns `None` on encode failure.
 fn rx_envelope(
     signal_type: PwmOutputSignalType,
     device: Option<PwmOutputDevice>,

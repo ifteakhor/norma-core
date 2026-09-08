@@ -175,8 +175,8 @@ impl ST3215BusCommunicator {
         Bytes::from(envelope_buf)
     }
 
-    /// A skipped record leaves the inference state untouched, so its
-    /// pointers keep naming the last record placed.
+    /// A skipped record does not update the inference state, so its pointers keep referring to the
+    /// last record written.
     pub async fn send_rx(
         &self,
         envelope: &st3215_proto::RxEnvelope,
@@ -199,8 +199,7 @@ impl ST3215BusCommunicator {
         Ok(())
     }
 
-    /// Drive states and servo errors arrive every tick; everything else is
-    /// said once.
+    /// Drive states and servo errors are periodic; everything else must not be dropped.
     fn rx_policy(signal_type: i32) -> Backpressure {
         match st3215_proto::St3215SignalType::try_from(signal_type) {
             Ok(st3215_proto::St3215SignalType::St3215DriveState)
@@ -209,7 +208,7 @@ impl ST3215BusCommunicator {
         }
     }
 
-    /// Runs inside the commands subscriber callback, so it cannot wait.
+    /// Called from the commands subscriber callback; must not block.
     pub fn send_tx(&self, envelope: &st3215_proto::TxEnvelope) {
         if let Err(e) = try_enqueue_with(
             &self.normfs,
@@ -546,16 +545,13 @@ impl ST3215BusCommunicator {
         }
     }
 
-    /// A snapshot that follows a skippable record is replaced by the next
-    /// one; a snapshot that follows a connect, disconnect, command result or
-    /// calibration change is the only one that says so, and is kept with it.
     fn encode_inference_state(&self) -> Bytes {
         let mut buf = Vec::new();
         self.state.read().state.encode(&mut buf).unwrap();
         Bytes::from(buf)
     }
 
-    /// The snapshot is kept or skipped with the rx record it follows.
+    /// Uses the policy of the rx record that triggered the update.
     async fn publish_inference_state(&self, policy: Backpressure) {
         let data = self.encode_inference_state();
         if let Err(e) = enqueue_with(&self.normfs, &self.inference_queue_id, data, policy).await {
@@ -563,8 +559,8 @@ impl ST3215BusCommunicator {
         }
     }
 
-    /// For the calibration paths, which are synchronous and partly run
-    /// inside the meta subscriber callback.
+    /// Synchronous variant for the calibration paths, some of which run inside the meta subscriber
+    /// callback.
     fn publish_inference_state_now(&self) {
         let data = self.encode_inference_state();
         if let Err(e) = try_enqueue_with(

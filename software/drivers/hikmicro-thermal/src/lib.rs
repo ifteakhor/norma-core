@@ -255,8 +255,7 @@ pub struct CameraIdentity {
     pub unique_id: String,
 }
 
-/// Where a capture thread writes. Capture runs on `spawn_blocking`, so this
-/// is allowed to block on a record that has to wait.
+/// Write target for the capture thread, which runs on `spawn_blocking` and may block.
 #[derive(Clone)]
 pub(crate) struct Sink {
     pub(crate) normfs: Arc<NormFS>,
@@ -264,7 +263,7 @@ pub(crate) struct Sink {
     pub(crate) runtime: tokio::runtime::Handle,
 }
 
-/// The blocks cannot be read without the device info, so that one waits.
+/// Frame blocks are skipped when the queue is full; device info is required by readers and waits.
 fn enqueue_envelope(
     sink: &Sink,
     envelope: hikmicro_proto::hikmicro::RxEnvelope,
@@ -280,7 +279,7 @@ fn enqueue_envelope(
             Err(e) => Err(e.to_string()),
         }
     } else {
-        // Bounded: shutdown joins this thread.
+        // Bounded so shutdown can join this thread.
         sink.runtime
             .block_on(tokio::time::timeout(
                 WRITE_TIMEOUT,
