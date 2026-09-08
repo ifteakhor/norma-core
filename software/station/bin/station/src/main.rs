@@ -886,6 +886,7 @@ impl Station {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    log::info!("Station {}", VERSION);
     log::info!("TCP address: {:?}", args.tcp);
     log::info!("Max queue disk size: {} bytes", args.max_queue_disk_size);
     log::info!("NormFS file size: {} bytes", args.normfs_file_size);
