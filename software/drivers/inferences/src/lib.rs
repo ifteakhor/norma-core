@@ -55,6 +55,7 @@ impl ShmWriter {
                 format!("inference shm {}: {e}", shm_path.display()),
             ))
         };
+        log::info!("Opening inference shm {} ({}MB)", shm_path.display(), shm_size_mb);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
