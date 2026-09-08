@@ -15,8 +15,7 @@ pub const QUEUE_ID: &str = "dmesg/rx";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RECORDS_PER_ENVELOPE: usize = 512;
-/// A record wider than one NormFS page is refused outright. The queue's
-/// pages are 256 KiB; this leaves room for the envelope around the records.
+/// Under the 256 KiB page, with room for the envelope around the records.
 const MAX_BYTES_PER_ENVELOPE: usize = 192 * 1024;
 const MAX_RECORDS_PER_SECOND: u32 = 200;
 const RESUME_SCAN_ENTRIES: u64 = 32;
@@ -112,10 +111,8 @@ impl Publisher {
             return;
         }
 
-        // Diagnostics matter most when the disk is in trouble, and the
-        // reader is rate-limited to 200 records a second, so this waits --
-        // but not forever: a queue that never frees a page must not pin
-        // the dmesg thread.
+        // Diagnostics matter most when the disk is in trouble, so this
+        // waits -- bounded, so a wedged queue cannot pin the dmesg thread.
         let sent = self.runtime.block_on(tokio::time::timeout(
             WRITE_TIMEOUT,
             self.normfs.enqueue(&self.queue_id, Bytes::from(buffer)),
@@ -337,9 +334,7 @@ fn fits_envelope(count: usize, bytes: usize, next_len: usize) -> bool {
     count < MAX_RECORDS_PER_ENVELOPE && bytes + next_len <= MAX_BYTES_PER_ENVELOPE
 }
 
-/// Splits records into runs that each fit one envelope, by count and by
-/// bytes. A single record wider than the budget goes alone; the reader caps
-/// records at 8 KiB, so it still fits a page.
+/// Runs of records that each fit one envelope, by count and by bytes.
 fn envelope_chunks(records: &[String]) -> Vec<&[String]> {
     let mut chunks = Vec::new();
     let mut start = 0;

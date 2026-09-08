@@ -143,8 +143,6 @@ impl<T: StationEngine> StateTracker<T> {
     ) -> Result<(), normfs::Error> {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        // Device and session records are said once, so they wait for a
-        // page -- but no longer than WRITE_TIMEOUT.
         enqueue_with(&self.normfs, queue_id, buf.freeze(), Backpressure::Keep).await
     }
 
@@ -234,9 +232,8 @@ impl<T: StationEngine> StateTracker<T> {
 
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        // The next frame is already on its way, and the capture thread must
-        // not park. Anything but a full queue -- a closed one, or a frame
-        // wider than a page -- would otherwise silence the camera for good.
+        // The capture thread must not park: a full queue is a skip, anything
+        // else would silence the camera and is worth a line.
         if let Err(e) = self.normfs.try_enqueue(queue_id, buf.freeze())
             && !matches!(e, normfs::Error::WouldBlock)
         {

@@ -5,7 +5,7 @@ use normfs::NormFS;
 use normfs::UintN;
 use parking_lot::RwLock;
 use prost::Message;
-use station_iface::{Backpressure, QueueWriter, WRITE_TIMEOUT};
+use station_iface::{Backpressure, WRITE_TIMEOUT, enqueue_with, try_enqueue_with};
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -17,10 +17,7 @@ pub struct VescTrampaCommunicator {
     pub normfs: Arc<NormFS>,
     pub tx_queue_id: normfs::QueueId,
     rx_queue_id: normfs::QueueId,
-    /// Written from a subscriber callback, which cannot wait for a page.
-    tx_writer: QueueWriter,
-    /// A snapshot follows every rx record and is kept or skipped with it.
-    inference_writer: QueueWriter,
+    inference_queue_id: normfs::QueueId,
     inference_states_queue_id: normfs::QueueId,
     state: Arc<RwLock<VescInferenceState>>,
 }
@@ -34,14 +31,15 @@ impl VescTrampaCommunicator {
     ) -> Result<Self, normfs::Error> {
         let inference_states_queue_id = normfs.resolve("inference-states");
         normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
-        let tx_writer = QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await?;
-        let inference_writer = QueueWriter::open(normfs.clone(), inference_queue_id).await?;
+        normfs.ensure_queue_exists_for_write(&tx_queue_id).await?;
+        normfs
+            .ensure_queue_exists_for_write(&inference_queue_id)
+            .await?;
         Ok(Self {
             normfs,
             tx_queue_id,
             rx_queue_id,
-            tx_writer,
-            inference_writer,
+            inference_queue_id,
             inference_states_queue_id,
             state: Arc::new(RwLock::new(VescInferenceState::default())),
         })
@@ -53,12 +51,9 @@ impl VescTrampaCommunicator {
         Bytes::from(envelope_buf)
     }
 
-    /// The caller says whether the record may be skipped: a values packet
-    /// the next 20 ms tick replaces may, while a board appearing or going
-    /// away, a command's result and the packet answering a command may not.
-    ///
-    /// A skipped record leaves the inference state untouched, so its pointer
-    /// keeps naming the last record that was placed.
+    /// The caller decides: a board packet is skippable when the next tick
+    /// replaces it, not when it answers a command. A skipped record leaves
+    /// the inference state untouched.
     pub async fn send_rx(
         &self,
         envelope: &crate::vesc_trampa_proto::RxEnvelope,
@@ -77,18 +72,23 @@ impl VescTrampaCommunicator {
                     .map_err(|_| "no page became free in time")??
             }
         };
-        self.update_state(envelope, ptr, policy);
+        self.update_state(envelope, ptr, policy).await;
         Ok(())
     }
 
-    /// Never fails and never waits: the writer task reports what it could not
-    /// place.
+    /// Runs inside the commands subscriber callback, so it cannot wait.
     pub fn send_tx(&self, envelope: &crate::vesc_trampa_proto::TxEnvelope) {
-        self.tx_writer
-            .write(Self::encode(envelope), Backpressure::Keep);
+        if let Err(e) = try_enqueue_with(
+            &self.normfs,
+            &self.tx_queue_id,
+            Self::encode(envelope),
+            Backpressure::Keep,
+        ) {
+            log::warn!("Failed to publish VESC Trampa command echo: {e}");
+        }
     }
 
-    fn update_state(
+    async fn update_state(
         &self,
         envelope: &vesc_trampa_proto::RxEnvelope,
         ptr: UintN,
@@ -120,7 +120,7 @@ impl VescTrampaCommunicator {
             let mut state = self.state.write();
             state.state.last_inference_queue_ptr = self.get_last_inference_id_bytes();
         }
-        self.publish_inference_state(policy);
+        self.publish_inference_state(policy).await;
     }
 
     fn add_board(
@@ -267,15 +267,19 @@ impl VescTrampaCommunicator {
         }
     }
 
-    /// A snapshot that follows a skippable record is replaced by the next
-    /// one; a snapshot that follows a connect, disconnect or command result
-    /// is the only one that says so, and is kept with it.
-    fn publish_inference_state(&self, policy: Backpressure) {
+    /// The snapshot is kept or skipped with the rx record it follows.
+    async fn publish_inference_state(&self, policy: Backpressure) {
         let mut buf = Vec::new();
+        self.state.read().state.encode(&mut buf).unwrap();
+        if let Err(e) = enqueue_with(
+            &self.normfs,
+            &self.inference_queue_id,
+            Bytes::from(buf),
+            policy,
+        )
+        .await
         {
-            let state = self.state.read();
-            state.state.encode(&mut buf).unwrap();
+            log::warn!("Failed to publish VESC Trampa inference state: {e}");
         }
-        self.inference_writer.write(Bytes::from(buf), policy);
     }
 }

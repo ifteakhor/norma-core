@@ -213,8 +213,6 @@ impl<K: StationEngine> StateTracker<K> {
     async fn send_envelope(&self, envelope: &RxEnvelope) -> Result<(), String> {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).map_err(|e| e.to_string())?;
-        // Connect, disconnect and session records are said once, so they
-        // wait for a page -- but no longer than WRITE_TIMEOUT.
         enqueue_with(
             &self.normfs,
             &self.queue_id,

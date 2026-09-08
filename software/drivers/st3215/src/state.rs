@@ -4,7 +4,7 @@ use log::warn;
 use normfs::NormFS;
 use normfs::UintN;
 use prost::Message;
-use station_iface::{Backpressure, QueueWriter, WRITE_TIMEOUT, enqueue_with};
+use station_iface::{Backpressure, WRITE_TIMEOUT, enqueue_with, try_enqueue_with};
 use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, sync::Arc};
 
@@ -29,10 +29,7 @@ pub struct ST3215BusCommunicator {
     pub rx_queue_id: normfs::QueueId,
     pub tx_queue_id: normfs::QueueId,
     pub meta_queue_id: normfs::QueueId,
-    /// Written from a subscriber callback, which cannot wait for a page.
-    tx_writer: QueueWriter,
-    /// A snapshot follows every rx record and is kept or skipped with it.
-    inference_writer: QueueWriter,
+    inference_queue_id: normfs::QueueId,
     inference_states_queue_id: normfs::QueueId,
     state: Arc<parking_lot::RwLock<InferenceState>>,
     bounds: Arc<parking_lot::RwLock<MotorBounds>>,
@@ -50,15 +47,16 @@ impl ST3215BusCommunicator {
         let inference_states_queue_id = normfs.resolve("inference-states");
         normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
         normfs.ensure_queue_exists_for_write(&meta_queue_id).await?;
-        let tx_writer = QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await?;
-        let inference_writer = QueueWriter::open(normfs.clone(), inference_queue_id).await?;
+        normfs.ensure_queue_exists_for_write(&tx_queue_id).await?;
+        normfs
+            .ensure_queue_exists_for_write(&inference_queue_id)
+            .await?;
         Ok(Self {
             normfs,
             rx_queue_id,
             tx_queue_id,
             meta_queue_id,
-            tx_writer,
-            inference_writer,
+            inference_queue_id,
             inference_states_queue_id,
             state: Arc::new(parking_lot::RwLock::new(InferenceState::default())),
             bounds: Arc::new(parking_lot::RwLock::new(HashMap::new())),
@@ -149,7 +147,7 @@ impl ST3215BusCommunicator {
         }
 
         // Publish updated InferenceState
-        self.publish_inference_state(Backpressure::Keep);
+        self.publish_inference_state_now();
     }
 
     pub fn clear_auto_calibration(&self, bus_serial: &str) {
@@ -168,7 +166,7 @@ impl ST3215BusCommunicator {
         }
 
         // Publish updated InferenceState
-        self.publish_inference_state(Backpressure::Keep);
+        self.publish_inference_state_now();
     }
 
     fn encode<M: Message>(envelope: &M) -> Bytes {
@@ -177,9 +175,8 @@ impl ST3215BusCommunicator {
         Bytes::from(envelope_buf)
     }
 
-    /// Waits or skips per [`Self::rx_policy`]. A skipped record leaves the
-    /// inference state untouched, so its pointers keep naming the last
-    /// record that was placed.
+    /// A skipped record leaves the inference state untouched, so its
+    /// pointers keep naming the last record placed.
     pub async fn send_rx(
         &self,
         envelope: &st3215_proto::RxEnvelope,
@@ -198,12 +195,11 @@ impl ST3215BusCommunicator {
                     .map_err(|_| "no page became free in time")??
             }
         };
-        self.update_state(envelope, id, policy);
+        self.update_state(envelope, id, policy).await;
         Ok(())
     }
 
-    /// A drive state arrives every tick, and so does a servo error while the
-    /// fault lasts: the next tick says the same thing. Everything else is
+    /// Drive states and servo errors arrive every tick; everything else is
     /// said once.
     fn rx_policy(signal_type: i32) -> Backpressure {
         match st3215_proto::St3215SignalType::try_from(signal_type) {
@@ -213,11 +209,16 @@ impl ST3215BusCommunicator {
         }
     }
 
-    /// Never fails and never waits: the writer task reports what it could not
-    /// place.
+    /// Runs inside the commands subscriber callback, so it cannot wait.
     pub fn send_tx(&self, envelope: &st3215_proto::TxEnvelope) {
-        self.tx_writer
-            .write(Self::encode(envelope), Backpressure::Keep);
+        if let Err(e) = try_enqueue_with(
+            &self.normfs,
+            &self.tx_queue_id,
+            Self::encode(envelope),
+            Backpressure::Keep,
+        ) {
+            warn!("Failed to publish ST3215 command echo: {e}");
+        }
     }
 
     pub async fn send_meta(
@@ -345,7 +346,12 @@ impl ST3215BusCommunicator {
         }
     }
 
-    fn update_state(&self, envelope: &st3215_proto::RxEnvelope, ptr: UintN, policy: Backpressure) {
+    async fn update_state(
+        &self,
+        envelope: &st3215_proto::RxEnvelope,
+        ptr: UintN,
+        policy: Backpressure,
+    ) {
         let bus_info = match &envelope.bus {
             Some(bus) => bus,
             None => return,
@@ -393,7 +399,7 @@ impl ST3215BusCommunicator {
             let mut state = self.state.write();
             state.state.last_inference_queue_ptr = self.get_last_inference_id_bytes();
         }
-        self.publish_inference_state(policy);
+        self.publish_inference_state(policy).await;
     }
 
     pub fn reset_bounds(&self, bus_serial: &str) {
@@ -543,12 +549,31 @@ impl ST3215BusCommunicator {
     /// A snapshot that follows a skippable record is replaced by the next
     /// one; a snapshot that follows a connect, disconnect, command result or
     /// calibration change is the only one that says so, and is kept with it.
-    fn publish_inference_state(&self, policy: Backpressure) {
+    fn encode_inference_state(&self) -> Bytes {
         let mut buf = Vec::new();
-        {
-            let state = self.state.read();
-            state.state.encode(&mut buf).unwrap();
+        self.state.read().state.encode(&mut buf).unwrap();
+        Bytes::from(buf)
+    }
+
+    /// The snapshot is kept or skipped with the rx record it follows.
+    async fn publish_inference_state(&self, policy: Backpressure) {
+        let data = self.encode_inference_state();
+        if let Err(e) = enqueue_with(&self.normfs, &self.inference_queue_id, data, policy).await {
+            warn!("Failed to publish ST3215 inference state: {e}");
         }
-        self.inference_writer.write(Bytes::from(buf), policy);
+    }
+
+    /// For the calibration paths, which are synchronous and partly run
+    /// inside the meta subscriber callback.
+    fn publish_inference_state_now(&self) {
+        let data = self.encode_inference_state();
+        if let Err(e) = try_enqueue_with(
+            &self.normfs,
+            &self.inference_queue_id,
+            data,
+            Backpressure::Keep,
+        ) {
+            warn!("Failed to publish ST3215 inference state: {e}");
+        }
     }
 }

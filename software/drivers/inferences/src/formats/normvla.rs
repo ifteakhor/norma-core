@@ -197,8 +197,7 @@ pub async fn generate_frame(
 
     let encoded_frame = Bytes::from(frame.encode_to_vec());
 
-    // The next inference tick brings a fresh frame, so a full queue is a
-    // skip, not a wait; anything else is worth a line.
+    // The next tick brings a fresh frame: a full queue is a skip.
     if let Err(e) = normfs.try_enqueue(&output_queue_id, encoded_frame.clone())
         && !matches!(e, normfs::Error::WouldBlock)
     {

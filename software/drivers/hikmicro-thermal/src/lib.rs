@@ -280,8 +280,7 @@ fn enqueue_envelope(
             Err(e) => Err(e.to_string()),
         }
     } else {
-        // Bounded: a queue that never frees a page must not pin this
-        // `spawn_blocking` thread, which shutdown joins on.
+        // Bounded: shutdown joins this thread.
         sink.runtime
             .block_on(tokio::time::timeout(
                 WRITE_TIMEOUT,

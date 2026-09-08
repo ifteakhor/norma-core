@@ -13,8 +13,9 @@ use normfs::NormFS;
 use parking_lot::Mutex;
 use prost::Message;
 use station_iface::{
-    Backpressure, QueueWriter, StationEngine,
+    Backpressure, StationEngine,
     iface_proto::{commands, drivers},
+    try_enqueue_with,
 };
 use tokio::sync::RwLock;
 
@@ -81,14 +82,14 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
         let worker_stopped = stopped.clone();
         let tx_queue_id = normfs.resolve(TX_QUEUE_ID);
 
-        let tx_writer = match QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await {
-            Ok(writer) => {
+        let tx_queue = match normfs.ensure_queue_exists_for_write(&tx_queue_id).await {
+            Ok(()) => {
                 station_engine.register_queue(
                     &tx_queue_id,
                     drivers::QueueDataType::QdtUsbVideoTx,
                     vec![],
                 );
-                Some(writer)
+                Some(tx_queue_id)
             }
             Err(e) => {
                 error!("Failed to start USB video TX queue: {}", e);
@@ -102,7 +103,7 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
 
         let command_subscription = match Self::subscribe_commands(
             normfs.clone(),
-            tx_writer,
+            tx_queue,
             state_tracker.clone(),
             driver_arc.clone(),
         ) {
@@ -184,11 +185,12 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
 
     fn subscribe_commands<T: StationEngine + Send + Sync>(
         normfs: Arc<NormFS>,
-        tx_writer: Option<QueueWriter>,
+        tx_queue_id: Option<normfs::QueueId>,
         tracker: Arc<StateTracker<T>>,
         driver: Arc<K>,
     ) -> Result<(normfs::QueueId, usize), normfs::Error> {
         let commands_queue_id = normfs.resolve(station_iface::COMMANDS_QUEUE_ID);
+        let cb_normfs = normfs.clone();
         let subscription_id = normfs.subscribe(
             &commands_queue_id,
             Box::new(move |entries: &[(normfs::UintN, Bytes)]| {
@@ -225,8 +227,8 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
                             command: Some(command),
                         };
 
-                        if let Some(writer) = &tx_writer {
-                            send_tx(writer, &envelope);
+                        if let Some(tx_queue_id) = &tx_queue_id {
+                            send_tx(&cb_normfs, tx_queue_id, &envelope);
                         }
 
                         tokio::spawn(Self::process_command(
@@ -677,8 +679,11 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
     }
 }
 
-fn send_tx(writer: &QueueWriter, envelope: &TxEnvelope) {
+/// Runs inside the commands subscriber callback, so it cannot wait.
+fn send_tx(normfs: &NormFS, tx_queue_id: &normfs::QueueId, envelope: &TxEnvelope) {
     let mut buf = BytesMut::new();
     envelope.encode(&mut buf).unwrap();
-    writer.write(buf.freeze(), Backpressure::Keep);
+    if let Err(e) = try_enqueue_with(normfs, tx_queue_id, buf.freeze(), Backpressure::Keep) {
+        error!("Failed to publish USB video command echo: {}", e);
+    }
 }

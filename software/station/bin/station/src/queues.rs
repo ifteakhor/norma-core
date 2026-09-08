@@ -6,27 +6,25 @@ use station_iface::iface_proto::{
     drivers::QueueDataType,
     envelope::{QueueData, QueueOpt, RootQueueEnvelope, RootQueueEnvelopeType},
 };
-use station_iface::{Backpressure, QueueWriter, STARTUP_WRITE_TIMEOUT};
+use station_iface::{Backpressure, STARTUP_WRITE_TIMEOUT, enqueue_waiting, try_enqueue_with};
 use std::sync::Arc;
 
 pub const MAIN_QUEUE_ID: &str = "main";
 
-/// Registrations come through a synchronous trait method that cannot wait, so
-/// the channel is sized to never fill.
-const MAIN_QUEUE_CAPACITY: usize = 256;
-
 pub struct MainQueue {
-    writer: QueueWriter,
+    normfs: Arc<NormFS>,
+    queue_id: normfs::QueueId,
     station_uuid: Bytes,
 }
 
 impl MainQueue {
     pub async fn new(normfs: Arc<NormFS>, station_uuid: Bytes) -> Result<Self> {
         let queue_id = normfs.resolve(MAIN_QUEUE_ID);
-        let writer = QueueWriter::spawn(normfs, queue_id, MAIN_QUEUE_CAPACITY).await?;
+        normfs.ensure_queue_exists_for_write(&queue_id).await?;
 
         Ok(Self {
-            writer,
+            normfs,
+            queue_id,
             station_uuid,
         })
     }
@@ -36,9 +34,13 @@ impl MainQueue {
         let envelope = self.create_envelope(RootQueueEnvelopeType::RqetAppStart, None);
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
-        self.writer
-            .write_awaiting(Bytes::from(buf), STARTUP_WRITE_TIMEOUT)
-            .await?;
+        enqueue_waiting(
+            &self.normfs,
+            &self.queue_id,
+            Bytes::from(buf),
+            STARTUP_WRITE_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
@@ -74,10 +76,17 @@ impl MainQueue {
         }
     }
 
+    /// Registrations arrive through a synchronous trait method, so this
+    /// cannot wait.
     fn send_envelope(&self, envelope: RootQueueEnvelope) -> Result<()> {
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
-        self.writer.write(Bytes::from(buf), Backpressure::Keep);
+        try_enqueue_with(
+            &self.normfs,
+            &self.queue_id,
+            Bytes::from(buf),
+            Backpressure::Keep,
+        )?;
         Ok(())
     }
 }

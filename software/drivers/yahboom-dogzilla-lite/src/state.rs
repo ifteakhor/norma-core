@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use log::warn;
 use normfs::NormFS;
 use prost::Message;
-use station_iface::{Backpressure, QueueWriter};
+use station_iface::{Backpressure, try_enqueue_with};
 use std::sync::Arc;
 
 type SendResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -13,9 +13,8 @@ type SendResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) struct YahboomDogzillaLiteCommunicator {
     pub(crate) normfs: Arc<NormFS>,
     pub(crate) tx_queue_id: normfs::QueueId,
-    rx_writer: QueueWriter,
-    tx_writer: QueueWriter,
-    inference_writer: QueueWriter,
+    rx_queue_id: normfs::QueueId,
+    inference_queue_id: normfs::QueueId,
     inference_states_queue_id: normfs::QueueId,
     state: Arc<parking_lot::RwLock<InferenceState>>,
 }
@@ -28,15 +27,16 @@ impl YahboomDogzillaLiteCommunicator {
         inference_queue_id: normfs::QueueId,
     ) -> Result<Self, normfs::Error> {
         let inference_states_queue_id = normfs.resolve("inference-states");
-        let rx_writer = QueueWriter::open(normfs.clone(), rx_queue_id).await?;
-        let tx_writer = QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await?;
-        let inference_writer = QueueWriter::open(normfs.clone(), inference_queue_id).await?;
+        normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
+        normfs.ensure_queue_exists_for_write(&tx_queue_id).await?;
+        normfs
+            .ensure_queue_exists_for_write(&inference_queue_id)
+            .await?;
         Ok(Self {
             normfs,
             tx_queue_id,
-            rx_writer,
-            tx_writer,
-            inference_writer,
+            rx_queue_id,
+            inference_queue_id,
             inference_states_queue_id,
             state: Arc::new(parking_lot::RwLock::new(InferenceState::default())),
         })
@@ -51,9 +51,11 @@ impl YahboomDogzillaLiteCommunicator {
         }
     }
 
+    /// Every writer here is synchronous -- the command path runs inside the
+    /// tx subscriber callback -- so nothing waits.
     pub(crate) fn send_rx(&self, envelope: &RxEnvelope) -> SendResult<()> {
         let policy = Self::rx_policy(envelope.signal_type);
-        self.rx_writer.write(Self::encode(envelope)?, policy);
+        try_enqueue_with(&self.normfs, &self.rx_queue_id, Self::encode(envelope)?, policy)?;
         if let Err(e) = self.update_state(envelope, policy) {
             warn!("Failed to update YAHBOOM_DOGZILLA_LITE inference state: {}", e);
         }
@@ -61,8 +63,7 @@ impl YahboomDogzillaLiteCommunicator {
     }
 
     pub(crate) fn send_tx(&self, envelope: &TxEnvelope) -> SendResult<()> {
-        self.tx_writer
-            .write(Self::encode(envelope)?, Backpressure::Keep);
+        try_enqueue_with(&self.normfs, &self.tx_queue_id, Self::encode(envelope)?, Backpressure::Keep)?;
         Ok(())
     }
 
@@ -155,16 +156,14 @@ impl YahboomDogzillaLiteCommunicator {
         self.publish_state(policy)
     }
 
-    /// The snapshot is kept or skipped with the rx record it follows: one
-    /// after a status update is replaced by the next, one after a connect or
-    /// disconnect is the only one that says so.
+    /// The snapshot is kept or skipped with the rx record it follows.
     fn publish_state(&self, policy: Backpressure) -> SendResult<()> {
         let mut buf = Vec::new();
         {
             let state = self.state.read();
             state.encode(&mut buf)?;
         }
-        self.inference_writer.write(Bytes::from(buf), policy);
+        try_enqueue_with(&self.normfs, &self.inference_queue_id, Bytes::from(buf), policy)?;
         Ok(())
     }
 

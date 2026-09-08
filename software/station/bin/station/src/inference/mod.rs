@@ -6,7 +6,7 @@ use normfs::NormFS;
 use normfs::UintN;
 use parking_lot::{Condvar, Mutex};
 use prost::Message;
-use station_iface::{QueueWriter, STARTUP_WRITE_TIMEOUT};
+use station_iface::{STARTUP_WRITE_TIMEOUT, enqueue_waiting};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -23,11 +23,18 @@ pub struct Inference {
     signal: InferenceSignal,
 }
 
+/// Dropping the runtime waits for `spawn_blocking` threads, so an early
+/// error out of `main` must not leave the worker parked on the condvar.
+impl Drop for Inference {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 impl Inference {
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
 
-        // Signal worker thread to wake up and exit
         let (lock, cvar) = &*self.signal;
         let mut signaled = lock.lock();
         *signaled = true;
@@ -47,10 +54,7 @@ impl Inference {
     }
 
     /// Names the run, so nothing else can be read without it.
-    async fn notify_startup(
-        normfs: &Arc<NormFS>,
-        writer: &QueueWriter,
-    ) -> Result<(), normfs::Error> {
+    async fn notify_startup(normfs: &Arc<NormFS>) -> Result<(), normfs::Error> {
         let inference_queue_id = normfs.resolve(QUEUE_ID);
         let inference_queue_ptr = match normfs.get_last_id(&inference_queue_id) {
             Ok(id) => id.value_to_bytes(),
@@ -67,15 +71,21 @@ impl Inference {
             inference_queue_ptr,
         };
 
-        writer
-            .write_awaiting(Bytes::from(startup.encode_to_vec()), STARTUP_WRITE_TIMEOUT)
-            .await
+        let startups_queue_id = normfs.resolve(STARTUPS_QUEUE_ID);
+        normfs
+            .ensure_queue_exists_for_write(&startups_queue_id)
+            .await?;
+        enqueue_waiting(
+            normfs,
+            &startups_queue_id,
+            Bytes::from(startup.encode_to_vec()),
+            STARTUP_WRITE_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn start(normfs: Arc<NormFS>) -> Result<Self, normfs::Error> {
-        let startups_queue_id = normfs.resolve(STARTUPS_QUEUE_ID);
-        let startups_writer = QueueWriter::open(normfs.clone(), startups_queue_id).await?;
-        if let Err(e) = Self::notify_startup(&normfs, &startups_writer).await {
+        if let Err(e) = Self::notify_startup(&normfs).await {
             log::error!("Failed to publish station startup: {:?}", e);
         }
 
@@ -101,8 +111,11 @@ impl Inference {
                     cvar.wait(&mut signaled);
                 }
 
-                // Check if shutdown requested
-                if shutdown_rx.try_recv().is_ok() {
+                // A sent signal or a dropped sender both mean stop.
+                if !matches!(
+                    shutdown_rx.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ) {
                     break;
                 }
 
@@ -131,8 +144,7 @@ impl Inference {
                         app_start_id: systime::get_app_start_id(),
                     };
 
-                    // This thread must not be parked, and the next signal
-                    // rebuilds the snapshot anyway.
+                    // The next signal rebuilds the snapshot.
                     if let Err(e) =
                         worker_normfs.try_enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec()))
                         && !matches!(e, normfs::Error::WouldBlock)
