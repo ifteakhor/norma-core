@@ -11,7 +11,7 @@ use bytes::BytesMut;
 use log::{info, warn};
 use normfs::NormFS;
 use prost::Message;
-use station_iface::{StationEngine, iface_proto::drivers::QueueDataType};
+use station_iface::{StationEngine, WRITE_TIMEOUT, iface_proto::drivers::QueueDataType};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub mod hikmicro_proto {
@@ -280,8 +280,14 @@ fn enqueue_envelope(
             Err(e) => Err(e.to_string()),
         }
     } else {
+        // Bounded: a queue that never frees a page must not pin this
+        // `spawn_blocking` thread, which shutdown joins on.
         sink.runtime
-            .block_on(sink.normfs.enqueue(&sink.queue_id, data))
+            .block_on(tokio::time::timeout(
+                WRITE_TIMEOUT,
+                sink.normfs.enqueue(&sink.queue_id, data),
+            ))
+            .map_err(|_| "no page became free in time".to_string())?
             .map(|_| ())
             .map_err(|e| e.to_string())
     }

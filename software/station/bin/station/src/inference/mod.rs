@@ -133,8 +133,12 @@ impl Inference {
 
                     // This thread must not be parked, and the next signal
                     // rebuilds the snapshot anyway.
-                    let _ = worker_normfs
-                        .try_enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec()));
+                    if let Err(e) =
+                        worker_normfs.try_enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec()))
+                        && !matches!(e, normfs::Error::WouldBlock)
+                    {
+                        log::error!("Failed to enqueue inference state: {e}");
+                    }
                 }
 
                 // Re-acquire lock for next iteration

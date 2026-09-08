@@ -52,11 +52,9 @@ impl YahboomDogzillaLiteCommunicator {
     }
 
     pub(crate) fn send_rx(&self, envelope: &RxEnvelope) -> SendResult<()> {
-        self.rx_writer.write(
-            Self::encode(envelope)?,
-            Self::rx_policy(envelope.signal_type),
-        );
-        if let Err(e) = self.update_state(envelope) {
+        let policy = Self::rx_policy(envelope.signal_type);
+        self.rx_writer.write(Self::encode(envelope)?, policy);
+        if let Err(e) = self.update_state(envelope, policy) {
             warn!("Failed to update YAHBOOM_DOGZILLA_LITE inference state: {}", e);
         }
         Ok(())
@@ -132,7 +130,7 @@ impl YahboomDogzillaLiteCommunicator {
         }
     }
 
-    fn update_state(&self, envelope: &RxEnvelope) -> SendResult<()> {
+    fn update_state(&self, envelope: &RxEnvelope, policy: Backpressure) -> SendResult<()> {
         let device = match &envelope.device {
             Some(d) => d,
             None => return Ok(()),
@@ -154,17 +152,19 @@ impl YahboomDogzillaLiteCommunicator {
             state.last_inference_queue_ptr = self.get_last_inference_id_bytes().to_vec();
         }
 
-        self.publish_state()
+        self.publish_state(policy)
     }
 
-    fn publish_state(&self) -> SendResult<()> {
+    /// The snapshot is kept or skipped with the rx record it follows: one
+    /// after a status update is replaced by the next, one after a connect or
+    /// disconnect is the only one that says so.
+    fn publish_state(&self, policy: Backpressure) -> SendResult<()> {
         let mut buf = Vec::new();
         {
             let state = self.state.read();
             state.encode(&mut buf)?;
         }
-        self.inference_writer
-            .write(Bytes::from(buf), Backpressure::Skip);
+        self.inference_writer.write(Bytes::from(buf), policy);
         Ok(())
     }
 

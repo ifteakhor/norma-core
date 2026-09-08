@@ -4,8 +4,8 @@ use bytes::Bytes;
 use log::{error, info};
 use normfs::{NormFS, QueueId};
 use prost::Message;
-use station_iface::StationEngine;
 use station_iface::iface_proto::drivers::QueueDataType;
+use station_iface::{StationEngine, WRITE_TIMEOUT};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,6 +15,9 @@ pub const QUEUE_ID: &str = "dmesg/rx";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RECORDS_PER_ENVELOPE: usize = 512;
+/// A record wider than one NormFS page is refused outright. The queue's
+/// pages are 256 KiB; this leaves room for the envelope around the records.
+const MAX_BYTES_PER_ENVELOPE: usize = 192 * 1024;
 const MAX_RECORDS_PER_SECOND: u32 = 200;
 const RESUME_SCAN_ENTRIES: u64 = 32;
 
@@ -110,17 +113,20 @@ impl Publisher {
         }
 
         // Diagnostics matter most when the disk is in trouble, and the
-        // reader is rate-limited to 200 records a second, so this waits.
-        let data = Bytes::from(buffer);
-        let sent = match self.normfs.try_enqueue(&self.queue_id, data.clone()) {
-            Err(normfs::Error::WouldBlock) => self
-                .runtime
-                .block_on(self.normfs.enqueue(&self.queue_id, data))
-                .map(|_| ()),
-            other => other.map(|_| ()),
-        };
-        if let Err(err) = sent {
-            error!("Failed to enqueue dmesg envelope: {}", err);
+        // reader is rate-limited to 200 records a second, so this waits --
+        // but not forever: a queue that never frees a page must not pin
+        // the dmesg thread.
+        let sent = self.runtime.block_on(tokio::time::timeout(
+            WRITE_TIMEOUT,
+            self.normfs.enqueue(&self.queue_id, Bytes::from(buffer)),
+        ));
+        match sent {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => error!("Failed to enqueue dmesg envelope: {}", err),
+            Err(_) => error!(
+                "Failed to enqueue dmesg envelope: no page became free within {:?}",
+                WRITE_TIMEOUT
+            ),
         }
     }
 
@@ -209,6 +215,7 @@ fn follow(
 ) {
     let mut buffer = vec![0u8; RECORD_BUFFER_SIZE];
     let mut batch: Vec<String> = Vec::new();
+    let mut batch_bytes = 0usize;
     let mut dropped: u64 = 0;
     let mut backlog = replay_backlog;
     let mut pending_gap = false;
@@ -222,11 +229,12 @@ fn follow(
                     continue;
                 }
 
-                batch.push(String::from_utf8_lossy(&buffer[..size]).into_owned());
-
-                if !backlog && batch.len() >= MAX_RECORDS_PER_ENVELOPE {
+                if !backlog && !fits_envelope(batch.len(), batch_bytes, size) {
                     flush(publisher, &mut batch, backlog, &mut dropped);
+                    batch_bytes = 0;
                 }
+                batch.push(String::from_utf8_lossy(&buffer[..size]).into_owned());
+                batch_bytes += size;
             }
             ReadOutcome::Drained => {
                 if backlog {
@@ -237,12 +245,14 @@ fn follow(
                         resume_after,
                         std::mem::take(&mut dropped),
                     );
+                    batch_bytes = 0;
                     if std::mem::take(&mut pending_gap) {
                         publisher.publish_gap();
                     }
                     publisher.publish_signal(DmesgSignalType::DmesgBacklogComplete);
                 } else {
                     flush(publisher, &mut batch, backlog, &mut dropped);
+                    batch_bytes = 0;
                 }
 
                 thread::sleep(POLL_INTERVAL);
@@ -252,6 +262,7 @@ fn follow(
                     pending_gap = true;
                 } else {
                     flush(publisher, &mut batch, backlog, &mut dropped);
+                    batch_bytes = 0;
                     publisher.publish_gap();
                 }
             }
@@ -312,13 +323,39 @@ fn publish_backlog(
 
     let mut dropped = dropped;
 
-    for chunk in records[start..].chunks(MAX_RECORDS_PER_ENVELOPE) {
+    for chunk in envelope_chunks(&records[start..]) {
         publisher.publish_records(chunk.to_vec(), true, std::mem::take(&mut dropped));
     }
 
     if dropped > 0 {
         publisher.publish_records(Vec::new(), true, dropped);
     }
+}
+
+/// Whether one more record of `next_len` bytes still fits the envelope.
+fn fits_envelope(count: usize, bytes: usize, next_len: usize) -> bool {
+    count < MAX_RECORDS_PER_ENVELOPE && bytes + next_len <= MAX_BYTES_PER_ENVELOPE
+}
+
+/// Splits records into runs that each fit one envelope, by count and by
+/// bytes. A single record wider than the budget goes alone; the reader caps
+/// records at 8 KiB, so it still fits a page.
+fn envelope_chunks(records: &[String]) -> Vec<&[String]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (i, record) in records.iter().enumerate() {
+        if i > start && !fits_envelope(i - start, bytes, record.len()) {
+            chunks.push(&records[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += record.len();
+    }
+    if start < records.len() {
+        chunks.push(&records[start..]);
+    }
+    chunks
 }
 
 fn flush(publisher: &Publisher, batch: &mut Vec<String>, from_backlog: bool, dropped: &mut u64) {

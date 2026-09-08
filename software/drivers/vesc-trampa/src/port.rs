@@ -10,6 +10,7 @@ use crate::vesc_trampa_proto::{
 use bytes::Bytes;
 use log::{debug, error, info, warn};
 use prost::Message;
+use station_iface::Backpressure;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
@@ -263,7 +264,9 @@ impl VescTrampaPort {
                 );
 
                 self.values = Some(values);
-                self.send_board_packet_signal(&source_packet).await?;
+                // The next 20 ms tick brings a fresh one.
+                self.send_board_packet_signal(&source_packet, Backpressure::Skip)
+                    .await?;
             }
             _ => unreachable!(),
         }
@@ -358,7 +361,9 @@ impl VescTrampaPort {
                 )
                 .into());
             }
-            self.send_board_packet_signal(&response_packet).await?;
+            // The only answer this command will get.
+            self.send_board_packet_signal(&response_packet, Backpressure::Keep)
+                .await?;
             return Ok(true);
         }
 
@@ -653,12 +658,13 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope).await
+        self.com.send_rx(&envelope, Backpressure::Keep).await
     }
 
     async fn send_board_packet_signal(
         &self,
         packet: &CommPacket,
+        policy: Backpressure,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let envelope = RxEnvelope {
             monotonic_stamp_ns: systime::get_monotonic_stamp_ns(),
@@ -670,7 +676,7 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope).await
+        self.com.send_rx(&envelope, policy).await
     }
 
     async fn send_command_received_signal(
@@ -707,7 +713,7 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope).await
+        self.com.send_rx(&envelope, Backpressure::Keep).await
     }
 
     fn to_board_packet_proto(packet: &CommPacket) -> VescTrampaBoardPacket {

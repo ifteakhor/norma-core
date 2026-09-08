@@ -232,8 +232,13 @@ impl<T: StationEngine> StateTracker<T> {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
         // The next frame is already on its way, and the capture thread must
-        // not park.
-        let _ = self.normfs.try_enqueue(queue_id, buf.freeze());
+        // not park. Anything but a full queue -- a closed one, or a frame
+        // wider than a page -- would otherwise silence the camera for good.
+        if let Err(e) = self.normfs.try_enqueue(queue_id, buf.freeze())
+            && !matches!(e, normfs::Error::WouldBlock)
+        {
+            log::error!("Failed to enqueue frame on {queue_id}: {e}");
+        }
     }
 }
 

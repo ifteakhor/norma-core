@@ -117,8 +117,12 @@ impl SystemMonitor {
         envelope.encode(&mut buf)?;
 
         // The next snapshot supersedes this one, so a full queue is a reason
-        // to skip rather than to hold the poll loop. NormFS reports the stall.
-        let _ = self.normfs.try_enqueue(&self.queue_id, Bytes::from(buf));
+        // to skip rather than to hold the poll loop.
+        if let Err(e) = self.normfs.try_enqueue(&self.queue_id, Bytes::from(buf))
+            && !matches!(e, normfs::Error::WouldBlock)
+        {
+            eprintln!("Failed to enqueue system info: {e}");
+        }
 
         Ok(())
     }

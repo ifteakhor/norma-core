@@ -144,12 +144,16 @@ impl St3215Driver {
                     .filter(|port| Self::is_st3215_device(port) && Self::can_use_port(port))
                     .collect();
 
-                let mut ports_guard = ports.write().await;
+                // Only this task adds ports, so a snapshot of the set is
+                // enough to decide; the lock is not held across the opens
+                // and writes below, which a port worker's exit would
+                // otherwise wait behind.
+                let known = ports.read().await.clone();
 
                 for port_info in st3215_ports {
                     let port_name = port_info.port_name.clone();
 
-                    if !ports_guard.contains(&port_name) {
+                    if !known.contains(&port_name) {
                         info!("New ST3215 port detected: {}", port_name);
                         let bus_info = Self::create_bus_info(&port_info);
 
@@ -158,7 +162,7 @@ impl St3215Driver {
                         {
                             Ok(mut port) => {
                                 Self::send_bus_connect_signal(com, &bus_info).await;
-                                ports_guard.insert(port_name.clone());
+                                ports.write().await.insert(port_name.clone());
                                 info!("Added ST3215 port to management: {}", port_name);
 
                                 let port_name_clone = port_name.clone();
