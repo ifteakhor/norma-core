@@ -135,6 +135,8 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
                     let sink_capture = sink;
                     let stop_capture = stop.clone();
                     let running_capture = running.clone();
+                    let close_normfs = normfs.clone();
+                    let close_queue_id = queue_id.clone();
                     let unique_id = camera.unique_id.clone();
                     let timeout = config.frame_timeout;
                     let frame_skip = config.frame_skip;
@@ -155,6 +157,10 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
                             );
                         } else {
                             info!("HIKMICRO capture {} stopped", unique_id);
+                        }
+                        // Returns the pages to the arena; the next discovery reopens it.
+                        if let Err(e) = close_normfs.close_queue(&close_queue_id).await {
+                            warn!("Failed to close HIKMICRO queue {}: {}", close_queue_id, e);
                         }
                         running_capture.lock().unwrap().remove(&unique_id);
                     });

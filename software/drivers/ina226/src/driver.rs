@@ -174,6 +174,11 @@ async fn run_device_worker(
         match read_register_dump(&i2c).await {
             Ok(dump) => {
                 if !connected {
+                    // Closed on disconnect; a start for write reopens it.
+                    if let Err(e) = normfs.ensure_queue_exists_for_write(&queue_id).await {
+                        error!("Failed to reopen INA226 queue {}: {}", queue_id, e);
+                        continue;
+                    }
                     send_device_signal(
                         &normfs,
                         &queue_id,
@@ -200,30 +205,30 @@ async fn run_device_worker(
             }
             Err(error) => {
                 if connected {
-                    send_device_signal(
-                        &normfs,
-                        &queue_id,
-                        &device,
+                    for signal_type in [
                         Ina226SignalType::Ina226Disconnected,
-                        last_dump.as_ref(),
-                        Some(error.clone()),
-                    )
-                    .await;
-                    connected = false;
-                }
-
-                if last_error.as_deref() != Some(error.as_str()) {
-                    send_device_signal(
-                        &normfs,
-                        &queue_id,
-                        &device,
                         Ina226SignalType::Ina226Error,
-                        last_dump.as_ref(),
-                        Some(error.clone()),
-                    )
-                    .await;
-                    last_error = Some(error);
+                    ] {
+                        send_device_signal(
+                            &normfs,
+                            &queue_id,
+                            &device,
+                            signal_type,
+                            last_dump.as_ref(),
+                            Some(error.clone()),
+                        )
+                        .await;
+                    }
+                    connected = false;
+                    // The queue is closed while the device is away, so later
+                    // errors are logged rather than recorded.
+                    if let Err(e) = normfs.close_queue(&queue_id).await {
+                        error!("Failed to close INA226 queue {}: {}", queue_id, e);
+                    }
+                } else if last_error.as_deref() != Some(error.as_str()) {
+                    warn!("INA226 {} unreachable: {}", device.id, error);
                 }
+                last_error = Some(error);
             }
         }
     }

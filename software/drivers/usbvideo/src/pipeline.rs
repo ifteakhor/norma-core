@@ -662,6 +662,7 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
 
                     if queue_started {
                         Self::send_device_disconnected(&queue_id, &cam_tracker, &camera).await;
+                        cam_tracker.handle_queue_end(&queue_id).await;
                     }
                     cam_known.write().await.remove(&camera.unique_id);
                 });

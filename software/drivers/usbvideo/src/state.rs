@@ -136,6 +136,13 @@ impl<T: StationEngine> StateTracker<T> {
             .register_queue(queue_id, QueueDataType::QdtUsbVideoFrames, vec![])
     }
 
+    /// Returns the camera's pages to the arena; the next connect reopens it.
+    pub async fn handle_queue_end(&self, queue_id: &normfs::QueueId) {
+        if let Err(e) = self.normfs.close_queue(queue_id).await {
+            error!("Failed to close USB video queue {}: {}", queue_id, e);
+        }
+    }
+
     pub async fn send_envelope(
         &self,
         queue_id: &normfs::QueueId,
