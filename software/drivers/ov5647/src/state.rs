@@ -3,7 +3,9 @@ use prost::Message;
 use std::sync::Arc;
 
 use normfs::NormFS;
-use station_iface::{StationEngine, iface_proto::drivers::QueueDataType};
+use station_iface::{
+    Backpressure, StationEngine, enqueue_with, iface_proto::drivers::QueueDataType,
+};
 use usbvideo::usbvideo_proto::{
     frame::{FrameFormat, FrameFormatKind, FrameStamp, FramesPack},
     usbvideo::{Camera, CameraFormat, RxEnvelope, RxEnvelopeType},
@@ -211,11 +213,16 @@ impl<K: StationEngine> StateTracker<K> {
     async fn send_envelope(&self, envelope: &RxEnvelope) -> Result<(), String> {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).map_err(|e| e.to_string())?;
-        self.normfs
-            .enqueue(&self.queue_id, buf.freeze())
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        // Connect, disconnect and session records are said once, so they
+        // wait for a page -- but no longer than WRITE_TIMEOUT.
+        enqueue_with(
+            &self.normfs,
+            &self.queue_id,
+            buf.freeze(),
+            Backpressure::Keep,
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
 
     fn get_last_inference_id_bytes(&self) -> Bytes {

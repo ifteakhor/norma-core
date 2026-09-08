@@ -4,7 +4,7 @@ use log::warn;
 use normfs::NormFS;
 use normfs::UintN;
 use prost::Message;
-use station_iface::{Backpressure, QueueWriter, WRITE_TIMEOUT};
+use station_iface::{Backpressure, QueueWriter, WRITE_TIMEOUT, enqueue_with};
 use std::sync::atomic::AtomicBool;
 use std::{collections::HashMap, sync::Arc};
 
@@ -224,9 +224,13 @@ impl ST3215BusCommunicator {
         &self,
         envelope: &st3215_proto::MetaEnvelope,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.normfs
-            .enqueue(&self.meta_queue_id, Self::encode(envelope))
-            .await?;
+        enqueue_with(
+            &self.normfs,
+            &self.meta_queue_id,
+            Self::encode(envelope),
+            Backpressure::Keep,
+        )
+        .await?;
         Ok(())
     }
 

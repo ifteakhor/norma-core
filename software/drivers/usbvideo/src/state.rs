@@ -6,7 +6,9 @@ use log::{error, warn};
 use normfs::NormFS;
 use parking_lot::Mutex;
 use prost::Message;
-use station_iface::{StationEngine, iface_proto::drivers::QueueDataType};
+use station_iface::{
+    Backpressure, StationEngine, enqueue_with, iface_proto::drivers::QueueDataType,
+};
 
 use crate::{
     converters::{self, FourCCFormat},
@@ -141,8 +143,9 @@ impl<T: StationEngine> StateTracker<T> {
     ) -> Result<(), normfs::Error> {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        self.normfs.enqueue(queue_id, buf.freeze()).await?;
-        Ok(())
+        // Device and session records are said once, so they wait for a
+        // page -- but no longer than WRITE_TIMEOUT.
+        enqueue_with(&self.normfs, queue_id, buf.freeze(), Backpressure::Keep).await
     }
 
     pub fn get_last_inference_id_bytes(&self) -> Bytes {
