@@ -174,7 +174,6 @@ async fn run_device_worker(
         match read_register_dump(&i2c).await {
             Ok(dump) => {
                 if !connected {
-                    // Closed on disconnect; a start for write reopens it.
                     if let Err(e) = normfs.ensure_queue_exists_for_write(&queue_id).await {
                         error!("Failed to reopen INA226 queue {}: {}", queue_id, e);
                         continue;

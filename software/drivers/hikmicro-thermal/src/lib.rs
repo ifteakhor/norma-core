@@ -158,7 +158,6 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
                         } else {
                             info!("HIKMICRO capture {} stopped", unique_id);
                         }
-                        // Returns the pages to the arena; the next discovery reopens it.
                         if let Err(e) = close_normfs.close_queue(&close_queue_id).await {
                             warn!("Failed to close HIKMICRO queue {}: {}", close_queue_id, e);
                         }

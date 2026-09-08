@@ -150,7 +150,6 @@ impl<T: StationEngine> VictronPort<T> {
             reason,
         )
         .await;
-        // Returns the pages to the arena; the next open reopens it.
         if let Err(err) = self.normfs.close_queue(&rx_queue_id).await {
             error!("Failed to close Victron queue {}: {}", rx_queue_id, err);
         }
