@@ -2,7 +2,8 @@ use std::{collections::HashMap, sync::{Arc, RwLock}};
 
 use prost::Message;
 use station_iface::{
-    StationEngine, iface_proto::{commands::StationCommandsPack, drivers}
+    Backpressure, QueueWriter, StationEngine,
+    iface_proto::{commands::StationCommandsPack, drivers}
 };
 use normfs::NormFS;
 use tokio::sync::mpsc;
@@ -34,7 +35,7 @@ pub async fn start<T: StationEngine>(
         let rx_queue_id = normfs.resolve(RX_QUEUE_ID);
 
         normfs.ensure_queue_exists_for_write(&modes_queue_id).await?;
-        normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
+        let rx_writer = QueueWriter::open(normfs.clone(), rx_queue_id.clone()).await?;
 
         station_engine.register_queue(
             &modes_queue_id,
@@ -52,19 +53,15 @@ pub async fn start<T: StationEngine>(
 
         let task_modes = modes.clone();
         let reading_normfs = normfs.clone();
-        let task_normfs = normfs.clone();
+        let task_rx_writer = rx_writer.clone();
 
-        let inf = Arc::new(inference::Inference::new(
-            motor_config,
-            normfs.clone(),
-        ));
+        let inf = Arc::new(inference::Inference::new(motor_config, normfs.clone()).await?);
         let read_inf = inf.clone();
 
         // Clone references for the command handler closure
         let cmd_modes = modes.clone();
         let cmd_inf = inf.clone();
-        let cmd_normfs = normfs.clone();
-        let cmd_rx_queue_id = rx_queue_id.clone();
+        let cmd_rx_writer = rx_writer;
 
         let modes_queue_id_clone = modes_queue_id.clone();
         tokio::spawn(async move {
@@ -104,20 +101,14 @@ pub async fn start<T: StationEngine>(
             log::info!("Restored {} bus modes from normfs", read_modes.len());
 
             let mut current_modes = task_modes.write().unwrap();
-            merge_modes(&mut current_modes, &read_modes, &read_inf, &task_normfs, &rx_queue_id, None);
+            merge_modes(&mut current_modes, &read_modes, &read_inf, &task_rx_writer, None);
         });
 
         let commands_queue_id = normfs.resolve("commands");
         normfs.subscribe(&commands_queue_id, Box::new(move |entries: &[(UintN, bytes::Bytes)]| {
             for (_, data) in entries {
                 if let Ok(pack) = StationCommandsPack::decode(data.as_ref()) {
-                    process_command_pack(
-                        &pack,
-                        &cmd_modes,
-                        &cmd_inf,
-                        &cmd_normfs,
-                        &cmd_rx_queue_id,
-                    );
+                    process_command_pack(&pack, &cmd_modes, &cmd_inf, &cmd_rx_writer);
                 }
             }
             true
@@ -130,8 +121,7 @@ fn merge_modes(
         current: &mut HashMap<BusKey, mirroring::BusMode>,
         new_modes: &HashMap<BusKey, mirroring::BusMode>,
         inference: &Inference,
-        normfs: &Arc<NormFS>,
-        rx_queue_id: &normfs::QueueId,
+        rx_writer: &QueueWriter,
         command: Option<mirroring::Command>,
     ) {
         for (key, value) in new_modes {
@@ -164,15 +154,14 @@ fn merge_modes(
             command,
         };
 
-        let _ = normfs.enqueue(rx_queue_id, rx_envelope.encode_to_vec().into());
+        rx_writer.write(rx_envelope.encode_to_vec().into(), Backpressure::Keep);
     }
 
     fn process_command_pack(
         pack: &StationCommandsPack,
         modes: &Arc<RwLock<HashMap<BusKey, mirroring::BusMode>>>,
         inference: &Arc<Inference>,
-        normfs: &Arc<NormFS>,
-        rx_queue_id: &normfs::QueueId,
+        rx_writer: &QueueWriter,
     ) {
         log::debug!("Received command pack: {:?}", pack.pack_id);
 
@@ -193,9 +182,9 @@ fn merge_modes(
             };
 
             if command.r#type == mirroring::CommandType::CtStopMirror as i32 {
-                handle_stop_mirror(command, modes, inference, normfs, rx_queue_id);
+                handle_stop_mirror(command, modes, inference, rx_writer);
             } else if command.r#type == mirroring::CommandType::CtStartMirror as i32 {
-                handle_start_mirror(command, modes, inference, normfs, rx_queue_id);
+                handle_start_mirror(command, modes, inference, rx_writer);
             }
         }
     }
@@ -204,8 +193,7 @@ fn merge_modes(
         command: mirroring::Command,
         modes: &Arc<RwLock<HashMap<BusKey, mirroring::BusMode>>>,
         inference: &Arc<Inference>,
-        normfs: &Arc<NormFS>,
-        rx_queue_id: &normfs::QueueId,
+        rx_writer: &QueueWriter,
     ) {
         let source_bus = match &command.source {
             Some(bus) => {
@@ -238,15 +226,14 @@ fn merge_modes(
         inference.stop(source_bus);
 
         let mut modes_guard = modes.write().unwrap();
-        merge_modes(&mut modes_guard, &HashMap::new(), inference, normfs, rx_queue_id, Some(command));
+        merge_modes(&mut modes_guard, &HashMap::new(), inference, rx_writer, Some(command));
     }
 
     fn handle_start_mirror(
         command: mirroring::Command,
         modes: &Arc<RwLock<HashMap<BusKey, mirroring::BusMode>>>,
         inference: &Arc<Inference>,
-        normfs: &Arc<NormFS>,
-        rx_queue_id: &normfs::QueueId,
+        rx_writer: &QueueWriter,
     ) {
         log::info!("Starting mirroring with command: {:?}", command);
 
@@ -314,5 +301,5 @@ fn merge_modes(
         inference.start(source, targets_keys);
 
         let mut modes_guard = modes.write().unwrap();
-        merge_modes(&mut modes_guard, &new_modes, inference, normfs, rx_queue_id, Some(command));
+        merge_modes(&mut modes_guard, &new_modes, inference, rx_writer, Some(command));
     }

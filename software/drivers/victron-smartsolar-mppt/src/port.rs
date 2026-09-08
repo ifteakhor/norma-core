@@ -5,7 +5,7 @@ use crate::registers;
 use crate::victron_smartsolar_mppt_proto::{RxEnvelope, VictronDevice, VictronSignalType};
 use bytes::Bytes;
 use log::{debug, error, info};
-use normfs::{NormFS, QueueId};
+use normfs::NormFS;
 use prost::Message;
 use station_iface::StationEngine;
 use station_iface::iface_proto::drivers::QueueDataType;
@@ -109,7 +109,8 @@ impl<T: StationEngine> VictronPort<T> {
             None,
             Vec::new(),
             String::new(),
-        );
+        )
+        .await;
         self.publish(
             &rx_queue_id,
             &device,
@@ -118,7 +119,8 @@ impl<T: StationEngine> VictronPort<T> {
             None,
             Vec::new(),
             String::new(),
-        );
+        )
+        .await;
 
         let poller: JoinHandle<()> = tokio::spawn(run_hex_poller(write_half));
 
@@ -146,16 +148,19 @@ impl<T: StationEngine> VictronPort<T> {
             None,
             Vec::new(),
             reason,
-        );
+        )
+        .await;
         Ok(())
     }
 
     async fn ensure_device_queue(
         &self,
         device: &VictronDevice,
-    ) -> Result<QueueId, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<normfs::QueueId, Box<dyn std::error::Error + Send + Sync>> {
         let rx_queue_id = self.normfs.resolve(&device_rx_queue_path(device));
-        self.normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
+        self.normfs
+            .ensure_queue_exists_for_write(&rx_queue_id)
+            .await?;
         self.station_engine.register_queue(
             &rx_queue_id,
             QueueDataType::QdtVictronSmartsolarMpptRx,
@@ -183,12 +188,16 @@ impl<T: StationEngine> VictronPort<T> {
 
         loop {
             let wait = match deadline {
-                Some(deadline) => deadline.checked_duration_since(Instant::now()).ok_or_else(|| {
-                    probe_err(
-                        ProbeErrorKind::Silent,
-                        "no valid VE.Direct block within probe timeout",
-                    )
-                })?,
+                Some(deadline) => {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| {
+                            probe_err(
+                                ProbeErrorKind::Silent,
+                                "no valid VE.Direct block within probe timeout",
+                            )
+                        })?
+                }
                 None => POLL_SLICE,
             };
 
@@ -238,7 +247,7 @@ impl<T: StationEngine> VictronPort<T> {
         &self,
         reader: &mut Reader,
         demux: &mut VeDirectDemux,
-        rx_queue_id: &QueueId,
+        rx_queue_id: &normfs::QueueId,
         device: &Arc<VictronDevice>,
         leftover: Vec<u8>,
         probe_block: Vec<u8>,
@@ -285,7 +294,8 @@ impl<T: StationEngine> VictronPort<T> {
                             None,
                             regs.values().cloned().collect(),
                             String::new(),
-                        );
+                        )
+                        .await;
                     }
                     Some(DemuxEvent::HexFrame(frame)) => {
                         last_valid = Instant::now();
@@ -305,7 +315,8 @@ impl<T: StationEngine> VictronPort<T> {
                             Some(frame),
                             regs.values().cloned().collect(),
                             String::new(),
-                        );
+                        )
+                        .await;
                     }
                     Some(DemuxEvent::TextBlockBad) | Some(DemuxEvent::HexFrameBad) => {
                         note_malformed(&mut malformed_count, &mut last_malformed_log);
@@ -323,15 +334,16 @@ impl<T: StationEngine> VictronPort<T> {
                     None,
                     Vec::new(),
                     format!("no valid VE.Direct frame for {:?}", last_valid.elapsed()),
-                );
+                )
+                .await;
                 fault_reported = true;
             }
         }
     }
 
-    fn publish(
+    async fn publish(
         &self,
-        rx_queue_id: &QueueId,
+        rx_queue_id: &normfs::QueueId,
         device: &VictronDevice,
         signal_type: VictronSignalType,
         data: Option<&[u8]>,
@@ -356,7 +368,24 @@ impl<T: StationEngine> VictronPort<T> {
             error!("Failed to encode Victron SmartSolar MPPT envelope: {err}");
             return;
         }
-        if let Err(err) = self.normfs.enqueue(rx_queue_id, Bytes::from(buffer)) {
+        // Text blocks and hex frames are a stream; connect, disconnect and
+        // error happen once.
+        let sent = if matches!(
+            signal_type,
+            VictronSignalType::VictronTextBlock | VictronSignalType::VictronHexFrame
+        ) {
+            self.normfs
+                .try_enqueue(rx_queue_id, Bytes::from(buffer))
+                .map(|_| ())
+        } else {
+            self.normfs
+                .enqueue(rx_queue_id, Bytes::from(buffer))
+                .await
+                .map(|_| ())
+        };
+        if let Err(err) = sent
+            && !matches!(err, normfs::Error::WouldBlock)
+        {
             error!("Failed to enqueue Victron SmartSolar MPPT envelope: {err}");
         }
     }
@@ -396,7 +425,10 @@ async fn run_hex_poller(mut writer: Writer) {
 
     loop {
         poll.tick().await;
-        if send_group(&mut writer, registers::CURRENT_GROUP).await.is_err() {
+        if send_group(&mut writer, registers::CURRENT_GROUP)
+            .await
+            .is_err()
+        {
             return;
         }
     }

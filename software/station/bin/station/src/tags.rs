@@ -4,6 +4,7 @@ use bytes::Bytes;
 use normfs::NormFS;
 use prost::Message;
 use station_iface::iface_proto::{commands::StationCommandsPack, drivers::StationCommandType};
+use station_iface::{Backpressure, QueueWriter};
 
 use crate::station_proto::inference_tags::{Command, CommandType, RxEnvelope};
 
@@ -11,12 +12,9 @@ const QUEUE_ID: &str = "inference-tags/rx";
 
 pub async fn start(normfs: Arc<NormFS>) -> Result<(), normfs::Error> {
     let tags_queue_id = normfs.resolve(QUEUE_ID);
-    normfs.ensure_queue_exists_for_write(&tags_queue_id).await?;
+    let writer = QueueWriter::open(normfs.clone(), tags_queue_id).await?;
 
     let commands_queue_id = normfs.resolve(station_iface::COMMANDS_QUEUE_ID);
-
-    let handler_normfs = normfs.clone();
-    let handler_queue_id = tags_queue_id.clone();
     normfs.subscribe(
         &commands_queue_id,
         Box::new(move |entries: &[(normfs::UintN, Bytes)]| {
@@ -40,8 +38,7 @@ pub async fn start(normfs: Arc<NormFS>) -> Result<(), normfs::Error> {
                         }
                     };
                     publish(
-                        &handler_normfs,
-                        &handler_queue_id,
+                        &writer,
                         tag_cmd.r#type(),
                         tag_cmd.inference_queue_ptr,
                         tag_cmd.tag,
@@ -55,13 +52,10 @@ pub async fn start(normfs: Arc<NormFS>) -> Result<(), normfs::Error> {
     Ok(())
 }
 
-fn publish(
-    normfs: &Arc<NormFS>,
-    queue_id: &normfs::QueueId,
-    cmd_type: CommandType,
-    inference_queue_ptr: Bytes,
-    tag: String,
-) {
+/// Runs inside a NormFS subscriber callback, which is called while the
+/// commands queue holds its append gate: waiting here would stall command
+/// ingestion for everybody.
+fn publish(writer: &QueueWriter, cmd_type: CommandType, inference_queue_ptr: Bytes, tag: String) {
     let envelope = RxEnvelope {
         monotonic_stamp_ns: systime::get_monotonic_stamp_ns(),
         local_stamp_ns: systime::get_local_stamp_ns(),
@@ -70,7 +64,5 @@ fn publish(
         inference_queue_ptr,
         tag,
     };
-    if let Err(e) = normfs.enqueue(queue_id, Bytes::from(envelope.encode_to_vec())) {
-        log::error!("Failed to publish inference tag: {:?}", e);
-    }
+    writer.write(Bytes::from(envelope.encode_to_vec()), Backpressure::Keep);
 }

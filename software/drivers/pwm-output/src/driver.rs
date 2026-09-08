@@ -4,11 +4,11 @@ use crate::pwm_output_proto::{
 };
 use bytes::{BufMut, Bytes, BytesMut};
 use log::{error, info, warn};
-use normfs::{NormFS, QueueId};
+use normfs::NormFS;
 use parking_lot::Mutex;
 use prost::Message;
-use station_iface::StationEngine;
 use station_iface::iface_proto::{commands, drivers};
+use station_iface::{Backpressure, QueueWriter, StationEngine};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -66,8 +66,8 @@ impl PwmOutputDriver {
     ) -> DriverResult<Self> {
         let rx_queue_id = normfs.resolve(RX_QUEUE_ID);
         let tx_queue_id = normfs.resolve(TX_QUEUE_ID);
-        normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
-        normfs.ensure_queue_exists_for_write(&tx_queue_id).await?;
+        let rx_writer = QueueWriter::open(normfs.clone(), rx_queue_id.clone()).await?;
+        let tx_writer = QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await?;
         station_engine.register_queue(&rx_queue_id, drivers::QueueDataType::QdtPwmOutputRx, vec![]);
         station_engine.register_queue(&tx_queue_id, drivers::QueueDataType::QdtPwmOutputTx, vec![]);
 
@@ -84,8 +84,7 @@ impl PwmOutputDriver {
 
             let runtime = OutputRuntime::new(output_config);
             send_rx(
-                &normfs,
-                &rx_queue_id,
+                &rx_writer,
                 PwmOutputSignalType::PwmOutputConfigured,
                 Some(runtime.device_proto()),
                 Some(runtime.state.clone()),
@@ -98,9 +97,9 @@ impl PwmOutputDriver {
         let outputs = Arc::new(Mutex::new(outputs));
         let transport = Arc::new(H7WaveTransport::new(config.device_path));
         subscribe_commands(
-            normfs.clone(),
-            rx_queue_id.clone(),
-            tx_queue_id,
+            normfs,
+            rx_writer,
+            tx_writer,
             outputs.clone(),
             transport.clone(),
         )?;
@@ -127,13 +126,12 @@ pub async fn start_pwm_output_driver<T: StationEngine>(
 
 fn subscribe_commands(
     normfs: Arc<NormFS>,
-    rx_queue_id: QueueId,
-    tx_queue_id: QueueId,
+    rx_writer: QueueWriter,
+    tx_writer: QueueWriter,
     outputs: Arc<Mutex<BTreeMap<String, OutputRuntime>>>,
     transport: Arc<H7WaveTransport>,
 ) -> Result<(), normfs::Error> {
     let commands_queue_id = normfs.resolve(station_iface::COMMANDS_QUEUE_ID);
-    let callback_normfs = normfs.clone();
     normfs.subscribe(
         &commands_queue_id,
         Box::new(move |entries: &[(normfs::UintN, Bytes)]| {
@@ -168,16 +166,10 @@ fn subscribe_commands(
                         command: Some(decoded),
                     };
 
-                    if let Err(error) = send_tx(&callback_normfs, &tx_queue_id, &envelope) {
+                    if let Err(error) = send_tx(&tx_writer, &envelope) {
                         error!("Failed to publish PWM output TX command: {}", error);
                     }
-                    process_command(
-                        &callback_normfs,
-                        &rx_queue_id,
-                        &outputs,
-                        &transport,
-                        envelope,
-                    );
+                    process_command(&rx_writer, &outputs, &transport, envelope);
                 }
             }
             true
@@ -188,15 +180,13 @@ fn subscribe_commands(
 }
 
 fn process_command(
-    normfs: &Arc<NormFS>,
-    rx_queue_id: &QueueId,
+    rx_writer: &QueueWriter,
     outputs: &Arc<Mutex<BTreeMap<String, OutputRuntime>>>,
     transport: &Arc<H7WaveTransport>,
     envelope: TxEnvelope,
 ) {
     send_rx(
-        normfs,
-        rx_queue_id,
+        rx_writer,
         PwmOutputSignalType::PwmOutputCommand,
         None,
         None,
@@ -206,8 +196,7 @@ fn process_command(
 
     let Some(command) = envelope.command.clone() else {
         send_rx(
-            normfs,
-            rx_queue_id,
+            rx_writer,
             PwmOutputSignalType::PwmOutputCommandRejected,
             None,
             None,
@@ -220,8 +209,7 @@ fn process_command(
     let target_output_id = command.target_output_id.clone();
     if target_output_id.trim().is_empty() {
         send_rx(
-            normfs,
-            rx_queue_id,
+            rx_writer,
             PwmOutputSignalType::PwmOutputCommandRejected,
             None,
             None,
@@ -234,8 +222,7 @@ fn process_command(
     let mut outputs = outputs.lock();
     let Some(output) = outputs.get_mut(target_output_id.as_str()) else {
         send_rx(
-            normfs,
-            rx_queue_id,
+            rx_writer,
             PwmOutputSignalType::PwmOutputCommandRejected,
             None,
             None,
@@ -249,8 +236,7 @@ fn process_command(
     match output.apply_command(&command, &envelope, transport) {
         Ok(()) => {
             send_rx(
-                normfs,
-                rx_queue_id,
+                rx_writer,
                 PwmOutputSignalType::PwmOutputCommandSuccess,
                 Some(device),
                 Some(output.state.clone()),
@@ -260,8 +246,7 @@ fn process_command(
         }
         Err(CommandError::Rejected(message)) => {
             send_rx(
-                normfs,
-                rx_queue_id,
+                rx_writer,
                 PwmOutputSignalType::PwmOutputCommandRejected,
                 Some(device),
                 Some(output.state.clone()),
@@ -271,8 +256,7 @@ fn process_command(
         }
         Err(CommandError::Failed(error)) => {
             send_rx(
-                normfs,
-                rx_queue_id,
+                rx_writer,
                 PwmOutputSignalType::PwmOutputCommandFailed,
                 Some(device),
                 Some(output.state.clone()),
@@ -283,16 +267,15 @@ fn process_command(
     }
 }
 
-fn send_tx(normfs: &Arc<NormFS>, queue_id: &QueueId, envelope: &TxEnvelope) -> DriverResult<()> {
+fn send_tx(writer: &QueueWriter, envelope: &TxEnvelope) -> DriverResult<()> {
     let mut buf = Vec::new();
     envelope.encode(&mut buf)?;
-    normfs.enqueue(queue_id, Bytes::from(buf))?;
+    writer.write(Bytes::from(buf), Backpressure::Keep);
     Ok(())
 }
 
 fn send_rx(
-    normfs: &Arc<NormFS>,
-    queue_id: &QueueId,
+    writer: &QueueWriter,
     signal_type: PwmOutputSignalType,
     device: Option<PwmOutputDevice>,
     state: Option<OutputState>,
@@ -315,9 +298,7 @@ fn send_rx(
         error!("Failed to encode PWM output RX envelope: {}", error);
         return;
     }
-    if let Err(error) = normfs.enqueue(queue_id, Bytes::from(buf)) {
-        error!("Failed to publish PWM output RX envelope: {}", error);
-    }
+    writer.write(Bytes::from(buf), Backpressure::Keep);
 }
 
 impl OutputRuntime {

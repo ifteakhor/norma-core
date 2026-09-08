@@ -1,6 +1,8 @@
 use crate::queues::MainQueue;
 use clap::{Parser, ValueEnum};
-use normfs::{CloudSettings, NormFS, NormFsSettings, PersistenceMode, QueueConfig, QueueSettings};
+use normfs::{
+    CloudSettings, NormFS, NormFsSettings, PersistenceMode, PoolKind, QueueConfig, QueueSettings,
+};
 use normfs_types::{CompressionType, EncryptionType};
 use parking_lot::Mutex;
 use station_iface::StationEngine;
@@ -173,6 +175,57 @@ struct Engine {
     inference: Mutex<Option<inference::Inference>>,
 }
 
+/// Split out so the queue-name-to-pool mapping can be tested: getting it
+/// wrong does not fail a build, it fails a write at runtime.
+fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
+    // Rules match the absolute queue id, "/<instance_id>/<path>", so every
+    // pattern needs a leading `*`; "hikmicro-thermal/*" matches nothing.
+    //
+    // The pool sets the page size, and the page size is the widest record the
+    // queue accepts: 256 KiB active against 32 KiB passive. A queue writing
+    // wider records than its pool allows has them refused outright.
+    let active = |compression_type, enable_fsync| QueueConfig {
+        compression_type,
+        enable_fsync,
+        encryption_type: EncryptionType::Aes,
+        pool: PoolKind::Active,
+    };
+
+    QueueSettings::new(
+        vec![
+            // usbvideo/<hash> and video/ov5647.
+            ("*video/*".to_string(), active(CompressionType::None, false)),
+            (
+                "*/hikmicro-thermal/*".to_string(),
+                active(CompressionType::Zstd, false),
+            ),
+            ("*dmesg/*".to_string(), active(CompressionType::Zstd, false)),
+            (
+                "*/inference-states".to_string(),
+                active(CompressionType::None, false),
+            ),
+            (
+                "*/inference/*".to_string(),
+                active(CompressionType::None, false),
+            ),
+            (
+                "*/*/inference".to_string(),
+                active(CompressionType::None, false),
+            ),
+            (
+                "*/system/rx".to_string(),
+                active(CompressionType::Zstd, true),
+            ),
+            (
+                "*/st3215/meta".to_string(),
+                active(CompressionType::Zstd, true),
+            ),
+        ],
+        QueueConfig::default(), // default config for all other queues
+    )
+    .map_err(Into::into)
+}
+
 impl station_iface::StationEngine for Engine {
     fn register_queue(
         &self,
@@ -250,44 +303,7 @@ impl Station {
             .write_buffer_size
             .min(args.normfs_file_size);
 
-        // Configure queue-specific settings
-        settings.queue_settings = QueueSettings::new(
-            vec![
-                (
-                    "*video/*".to_string(),
-                    QueueConfig {
-                        compression_type: CompressionType::None,
-                        enable_fsync: false,
-                        encryption_type: EncryptionType::Aes,
-                    },
-                ),
-                (
-                    "*inference-queues/*".to_string(),
-                    QueueConfig {
-                        compression_type: CompressionType::None,
-                        enable_fsync: false,
-                        encryption_type: EncryptionType::Aes,
-                    },
-                ),
-                (
-                    "hikmicro-thermal/*".to_string(),
-                    QueueConfig {
-                        compression_type: CompressionType::Zstd,
-                        enable_fsync: false,
-                        encryption_type: EncryptionType::Aes,
-                    },
-                ),
-                (
-                    "*dmesg/*".to_string(),
-                    QueueConfig {
-                        compression_type: CompressionType::Zstd,
-                        enable_fsync: false,
-                        encryption_type: EncryptionType::Aes,
-                    },
-                ),
-            ],
-            QueueConfig::default(), // default config for all other queues
-        )?;
+        settings.queue_settings = queue_settings()?;
 
         // Configure Cloud settings if provided
         if matches!(
@@ -337,7 +353,10 @@ impl Station {
     async fn start_main_queue(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let main_queue =
             MainQueue::new(self.normfs.clone(), self.normfs.get_instance_id_bytes()).await?;
-        main_queue.send_app_start().unwrap();
+        // Loud, not fatal.
+        if let Err(e) = main_queue.send_app_start().await {
+            log::error!("Failed to record the app start: {}", e);
+        }
 
         if let Some(engine) = Arc::get_mut(&mut self.engine) {
             engine.main_queue = Some(main_queue);
@@ -868,7 +887,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tags::start(station.normfs.clone()).await?;
 
-    let inference = inference::Inference::start(station.normfs.clone());
+    let inference = inference::Inference::start(station.normfs.clone()).await?;
     *station.engine.inference.lock() = Some(inference);
 
     station.start_drivers().await?;
@@ -904,13 +923,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let web_shutdown_clone = web_shutdown.clone();
         let static_path = args.static_path.clone();
         web_server_handle = Some(tokio::spawn(async move {
-            if let Err(e) = web::server::start_server(
-                web_addr,
-                normfs_clone,
-                web_shutdown_clone,
-                static_path,
-            )
-            .await
+            if let Err(e) =
+                web::server::start_server(web_addr, normfs_clone, web_shutdown_clone, static_path)
+                    .await
             {
                 log::error!("Web server error: {}", e);
             }
@@ -967,4 +982,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Data persisted at: {:?}", args.normfs_base_folder);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_for(queue_path: &str) -> PoolKind {
+        queue_settings().unwrap().get_config(queue_path).pool
+    }
+
+    #[test]
+    fn queues_with_wide_records_draw_from_the_active_arena() {
+        for queue in [
+            "/inst123/usbvideo/9f86d081884c7d65",
+            "/inst123/video/ov5647",
+            "/inst123/hikmicro-thermal/E12345",
+            "/inst123/dmesg/rx",
+            "/inst123/system/rx",
+            "/inst123/st3215/meta",
+            "/inst123/inference-states",
+            "/inst123/inference/normvla",
+            "/inst123/inference/mirroring",
+            "/inst123/st3215/inference",
+            "/inst123/vesc-trampa/inference",
+            "/inst123/yahboom-dogzilla-lite/inference",
+        ] {
+            assert_eq!(pool_for(queue), PoolKind::Active, "{queue}");
+        }
+    }
+
+    #[test]
+    fn rare_queues_stay_on_the_passive_arena() {
+        for queue in [
+            "/inst123/main",
+            "/inst123/startups",
+            "/inst123/commands",
+            "/inst123/inference-tags/rx",
+            "/inst123/st3215/rx",
+            "/inst123/st3215/tx",
+            "/inst123/ina226/i2c-1-0x40/rx",
+        ] {
+            assert_eq!(pool_for(queue), PoolKind::Passive, "{queue}");
+        }
+    }
+
+    /// The bug this replaced: the rule silently applied to nothing.
+    #[test]
+    fn a_rule_without_a_leading_star_matches_no_absolute_id() {
+        let settings = QueueSettings::new(
+            vec![("hikmicro-thermal/*".to_string(), QueueConfig::active())],
+            QueueConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.get_config("/inst123/hikmicro-thermal/E12345").pool,
+            PoolKind::Passive
+        );
+    }
 }

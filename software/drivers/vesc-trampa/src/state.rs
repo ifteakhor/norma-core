@@ -5,6 +5,7 @@ use normfs::NormFS;
 use normfs::UintN;
 use parking_lot::RwLock;
 use prost::Message;
+use station_iface::{Backpressure, QueueWriter};
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -14,46 +15,64 @@ struct VescInferenceState {
 
 pub struct VescTrampaCommunicator {
     pub normfs: Arc<NormFS>,
-    pub rx_queue_id: normfs::QueueId,
     pub tx_queue_id: normfs::QueueId,
+    rx_queue_id: normfs::QueueId,
     inference_queue_id: normfs::QueueId,
+    /// The only queue here written from a subscriber callback, which cannot
+    /// wait for a page.
+    tx_writer: QueueWriter,
     inference_states_queue_id: normfs::QueueId,
     state: Arc<RwLock<VescInferenceState>>,
 }
 
 impl VescTrampaCommunicator {
-    pub fn new(
+    pub async fn new(
         normfs: Arc<NormFS>,
         rx_queue_id: normfs::QueueId,
         tx_queue_id: normfs::QueueId,
         inference_queue_id: normfs::QueueId,
-    ) -> Self {
+    ) -> Result<Self, normfs::Error> {
         let inference_states_queue_id = normfs.resolve("inference-states");
-        Self {
+        normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
+        normfs
+            .ensure_queue_exists_for_write(&inference_queue_id)
+            .await?;
+        let tx_writer = QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await?;
+        Ok(Self {
             normfs,
-            rx_queue_id,
             tx_queue_id,
+            rx_queue_id,
             inference_queue_id,
+            tx_writer,
             inference_states_queue_id,
             state: Arc::new(RwLock::new(VescInferenceState::default())),
-        }
+        })
     }
 
-    fn send_envelope<M: Message>(
-        &self,
-        queue_id: &normfs::QueueId,
-        envelope: &M,
-    ) -> Result<normfs::UintN, normfs::Error> {
+    fn encode<M: Message>(envelope: &M) -> Bytes {
         let mut envelope_buf = Vec::new();
         envelope.encode(&mut envelope_buf).unwrap();
-        self.normfs.enqueue(queue_id, Bytes::from(envelope_buf))
+        Bytes::from(envelope_buf)
     }
 
-    pub fn send_rx(
+    /// A board packet the next 20 ms tick replaces is worth skipping; a board
+    /// appearing or going away, and a command's result, are not.
+    pub async fn send_rx(
         &self,
         envelope: &crate::vesc_trampa_proto::RxEnvelope,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let ptr = self.send_envelope(&self.rx_queue_id, envelope)?;
+        let data = Self::encode(envelope);
+        let ptr = if envelope.signal_type
+            == vesc_trampa_proto::VescTrampaSignalType::VescTrampaBoardPacket as i32
+        {
+            match self.normfs.try_enqueue(&self.rx_queue_id, data) {
+                Ok(id) => id,
+                Err(normfs::Error::WouldBlock) => return Ok(()),
+                Err(e) => return Err(Box::new(e)),
+            }
+        } else {
+            self.normfs.enqueue(&self.rx_queue_id, data).await?
+        };
         self.update_state(envelope, ptr);
         Ok(())
     }
@@ -62,7 +81,8 @@ impl VescTrampaCommunicator {
         &self,
         envelope: &crate::vesc_trampa_proto::TxEnvelope,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.send_envelope(&self.tx_queue_id, envelope)?;
+        self.tx_writer
+            .write(Self::encode(envelope), Backpressure::Keep);
         Ok(())
     }
 
@@ -240,10 +260,13 @@ impl VescTrampaCommunicator {
     }
 
     fn publish_inference_state(&self) {
-        let state = self.state.read();
         let mut buf = Vec::new();
-        state.state.encode(&mut buf).unwrap();
-        let data = Bytes::from(buf);
-        let _ = self.normfs.enqueue(&self.inference_queue_id, data);
+        {
+            let state = self.state.read();
+            state.state.encode(&mut buf).unwrap();
+        }
+        let _ = self
+            .normfs
+            .try_enqueue(&self.inference_queue_id, Bytes::from(buf));
     }
 }

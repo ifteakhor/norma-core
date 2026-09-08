@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use normfs::NormFS;
 use prost::Message;
-use station_iface::StationEngine;
 use station_iface::iface_proto::drivers::QueueDataType;
+use station_iface::StationEngine;
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "macos")]
@@ -116,7 +116,9 @@ impl SystemMonitor {
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
 
-        self.normfs.enqueue(&self.queue_id, Bytes::from(buf))?;
+        // The next snapshot supersedes this one, so a full queue is a reason
+        // to skip rather than to hold the poll loop. NormFS reports the stall.
+        let _ = self.normfs.try_enqueue(&self.queue_id, Bytes::from(buf));
 
         Ok(())
     }

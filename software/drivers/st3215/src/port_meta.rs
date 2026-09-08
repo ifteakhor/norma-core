@@ -5,14 +5,14 @@ use std::{
 
 use normfs::UintN;
 use prost::Message;
-use tokio::sync::{mpsc, oneshot};
 use std::sync::atomic::Ordering;
+use tokio::sync::{mpsc, oneshot};
 
-use normfs::{ReadPosition, ReadEntry};
+use normfs::{ReadEntry, ReadPosition};
 
 use crate::{
     calibrate,
-    protocol::{normal_position, EepromRegister, RamRegister, ServoError},
+    protocol::{EepromRegister, RamRegister, ServoError, normal_position},
     st3215_proto::{MetaEnvelope, MetaEnvelopeType, MotorArc, RxEnvelope, St3215SignalType},
     state::ST3215BusCommunicator,
 };
@@ -140,7 +140,13 @@ impl St3215PortMeta {
             let (tx, mut rx) = mpsc::channel::<ReadEntry>(64);
             let rx_queue_id = comm.rx_queue_id.clone();
             normfs
-                .read(&rx_queue_id, ReadPosition::ShiftFromTail(UintN::zero()), 0, 1, tx)
+                .read(
+                    &rx_queue_id,
+                    ReadPosition::ShiftFromTail(UintN::zero()),
+                    0,
+                    1,
+                    tx,
+                )
                 .await
                 .unwrap();
 
@@ -173,7 +179,10 @@ impl St3215PortMeta {
                         // Stop any ongoing calibration
                         if let Some(stop_flag) = comm.get_calibration_stop(&target_serial) {
                             stop_flag.store(true, Ordering::Relaxed);
-                            log::info!("Stopping ongoing calibration for reset on bus '{}'", &target_serial);
+                            log::info!(
+                                "Stopping ongoing calibration for reset on bus '{}'",
+                                &target_serial
+                            );
                         }
 
                         comm.reset_bounds(&target_serial);
@@ -185,7 +194,7 @@ impl St3215PortMeta {
                             rx_uintn_ptr: entry.id.value_to_bytes(),
                             ..Default::default()
                         };
-                        if let Err(e) = comm.send_meta(&meta_envelope) {
+                        if let Err(e) = comm.send_meta(&meta_envelope).await {
                             log::error!("Failed to send reset calibration meta: {:?}", e);
                             return;
                         }
@@ -207,59 +216,72 @@ impl St3215PortMeta {
 
                         // Use provided arcs if available, otherwise calculate from motor_points
                         let arcs: Vec<MotorArc> = if !freeze_cmd.arcs.is_empty() {
-                            log::info!("Using {} provided motor arcs for freeze", freeze_cmd.arcs.len());
+                            log::info!(
+                                "Using {} provided motor arcs for freeze",
+                                freeze_cmd.arcs.len()
+                            );
 
                             // Calculate centered bounds from provided arcs
                             // port.rs::freeze_calibration will use the midpoint from command to write offset
-                            freeze_cmd.arcs.iter().map(|arc| {
-                                let raw_min = arc.min_angle;
-                                let raw_max = arc.max_angle;
+                            freeze_cmd
+                                .arcs
+                                .iter()
+                                .map(|arc| {
+                                    let raw_min = arc.min_angle;
+                                    let raw_max = arc.max_angle;
 
-                                log::info!(
-                                    "Motor {}: Received raw arc min={} max={} midpoint={}",
-                                    arc.motor_id, raw_min, raw_max, arc.midpoint
-                                );
+                                    log::info!(
+                                        "Motor {}: Received raw arc min={} max={} midpoint={}",
+                                        arc.motor_id,
+                                        raw_min,
+                                        raw_max,
+                                        arc.midpoint
+                                    );
 
-                                // Calculate range (handle wrap-around)
-                                let range = if raw_max >= raw_min {
-                                    raw_max - raw_min
-                                } else {
-                                    (4096 - raw_min) + raw_max
-                                };
+                                    // Calculate range (handle wrap-around)
+                                    let range = if raw_max >= raw_min {
+                                        raw_max - raw_min
+                                    } else {
+                                        (4096 - raw_min) + raw_max
+                                    };
 
-                                // Center around 2048
-                                let new_min = 2048 - (range as i32 / 2);
-                                let new_max = 2048 + (range as i32 / 2);
+                                    // Center around 2048
+                                    let new_min = 2048 - (range as i32 / 2);
+                                    let new_max = 2048 + (range as i32 / 2);
 
-                                let new_min = (new_min + 4096) % 4096;
-                                let new_max = new_max % 4096;
+                                    let new_min = (new_min + 4096) % 4096;
+                                    let new_max = new_max % 4096;
 
-                                let new_min = new_min as u32;
-                                let new_max = new_max as u32;
+                                    let new_min = new_min as u32;
+                                    let new_max = new_max as u32;
 
-                                log::info!(
-                                    "Motor {}: Centered bounds min={} max={} (range={})",
-                                    arc.motor_id, new_min, new_max, range
-                                );
+                                    log::info!(
+                                        "Motor {}: Centered bounds min={} max={} (range={})",
+                                        arc.motor_id,
+                                        new_min,
+                                        new_max,
+                                        range
+                                    );
 
-                                // Update bounds with centered values
-                                comm.update_bounds(
-                                    &target_serial,
-                                    arc.motor_id,
-                                    new_min,
-                                    new_max,
-                                    true,  // Frozen
-                                );
+                                    // Update bounds with centered values
+                                    comm.update_bounds(
+                                        &target_serial,
+                                        arc.motor_id,
+                                        new_min,
+                                        new_max,
+                                        true, // Frozen
+                                    );
 
-                                // Return centered arc for meta envelope
-                                MotorArc {
-                                    motor_id: arc.motor_id,
-                                    min_angle: new_min,
-                                    max_angle: new_max,
-                                    range_freezed: true,
-                                    positions: vec![],
-                                }
-                            }).collect()
+                                    // Return centered arc for meta envelope
+                                    MotorArc {
+                                        motor_id: arc.motor_id,
+                                        min_angle: new_min,
+                                        max_angle: new_max,
+                                        range_freezed: true,
+                                        positions: vec![],
+                                    }
+                                })
+                                .collect()
                         } else {
                             log::info!("No arcs provided, calculating from motor_points");
 
@@ -311,7 +333,7 @@ impl St3215PortMeta {
                             arcs,
                             ..Default::default()
                         };
-                        if let Err(e) = comm.send_meta(&meta_envelope) {
+                        if let Err(e) = comm.send_meta(&meta_envelope).await {
                             log::error!("Failed to send freeze calibration meta: {:?}", e);
                             return;
                         }
@@ -330,11 +352,17 @@ impl St3215PortMeta {
                         );
                         if let Some(stop_flag) = comm.get_calibration_stop(&target_serial) {
                             stop_flag.store(true, Ordering::Relaxed);
-                            log::info!("Auto-calibration stop flag set for bus '{}'", &target_serial);
+                            log::info!(
+                                "Auto-calibration stop flag set for bus '{}'",
+                                &target_serial
+                            );
                             // Clean up the stop flag from storage
                             comm.clear_calibration_stop(&target_serial);
                         } else {
-                            log::warn!("No active auto-calibration found for bus '{}'", &target_serial);
+                            log::warn!(
+                                "No active auto-calibration found for bus '{}'",
+                                &target_serial
+                            );
                         }
                         continue;
                     }
@@ -404,7 +432,7 @@ impl St3215PortMeta {
                             Ok(b) => b,
                             Err(_) => continue,
                         };
-                    
+
                     let offset = i16::from_le_bytes(offset_bytes);
                     let position = normal_position(u16::from_le_bytes(position_bytes));
                     let position = ((position as i32 + offset as i32 + 4096) % 4096) as u16;
@@ -414,7 +442,11 @@ impl St3215PortMeta {
                         let cal_arc = calibrate::calculate_arc(points);
                         log::debug!(
                             "Motor {}: new point position={} offset={} range_min={} range_max={}",
-                            motor_id, position, offset, cal_arc.min, cal_arc.max
+                            motor_id,
+                            position,
+                            offset,
+                            cal_arc.min,
+                            cal_arc.max
                         );
                         comm.update_bounds(
                             &target_serial,

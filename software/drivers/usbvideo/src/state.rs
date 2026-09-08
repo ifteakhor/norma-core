@@ -126,19 +126,22 @@ impl<T: StationEngine> StateTracker<T> {
     }
 
     pub async fn handle_queue_start(&self, queue_id: &normfs::QueueId) {
-        let _ = self.normfs.ensure_queue_exists_for_write(queue_id).await;
+        if let Err(e) = self.normfs.ensure_queue_exists_for_write(queue_id).await {
+            error!("Failed to start USB video queue {}: {}", queue_id, e);
+            return;
+        }
         self.station_engine
             .register_queue(queue_id, QueueDataType::QdtUsbVideoFrames, vec![])
     }
 
-    pub fn send_envelope(
+    pub async fn send_envelope(
         &self,
         queue_id: &normfs::QueueId,
         envelope: RxEnvelope,
     ) -> Result<(), normfs::Error> {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        self.normfs.enqueue(queue_id, buf.freeze())?;
+        self.normfs.enqueue(queue_id, buf.freeze()).await?;
         Ok(())
     }
 
@@ -228,12 +231,9 @@ impl<T: StationEngine> StateTracker<T> {
 
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        if let Err(e) = self.normfs.enqueue(queue_id, buf.freeze()) {
-            error!(
-                "Failed to enqueue envelope for camera {}: {}",
-                camera.unique_id, e
-            );
-        }
+        // The next frame is already on its way, and the capture thread must
+        // not park.
+        let _ = self.normfs.try_enqueue(queue_id, buf.freeze());
     }
 }
 

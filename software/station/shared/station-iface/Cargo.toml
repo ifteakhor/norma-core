@@ -9,6 +9,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 humantime-serde = "1.1"
 normfs = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+normfs-types = { workspace = true }
+tempfile = "3"
 
 [build-dependencies]
 prost-build = { workspace = true }

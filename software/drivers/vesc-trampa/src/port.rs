@@ -148,7 +148,10 @@ impl VescTrampaPort {
             }),
         )?;
 
-        if let Err(error) = self.send_board_signal(VescTrampaSignalType::VescTrampaBoardConnect) {
+        if let Err(error) = self
+            .send_board_signal(VescTrampaSignalType::VescTrampaBoardConnect)
+            .await
+        {
             normfs.unsubscribe(&tx_queue_id, subscription_id);
             return Err(error);
         }
@@ -165,7 +168,7 @@ impl VescTrampaPort {
                     command_waiting.store(false, Ordering::SeqCst);
                     self.log_command_received(&command);
 
-                    if let Err(error) = self.send_command_received_signal(&command) {
+                    if let Err(error) = self.send_command_received_signal(&command).await {
                         error!("Failed to send VESC Trampa command received signal: {}", error);
                         break;
                     }
@@ -178,18 +181,21 @@ impl VescTrampaPort {
                                 VescTrampaSignalType::VescTrampaCommandRejected
                             };
 
-                            if let Err(error) = self.send_command_result_signal(&command, signal_type, None) {
+                            if let Err(error) = self.send_command_result_signal(&command, signal_type, None).await {
                                 error!("Failed to send VESC Trampa command result signal: {}", error);
                                 break;
                             }
                         }
                         Err(error) => {
                             let error_message = error.to_string();
-                            if let Err(send_error) = self.send_command_result_signal(
-                                &command,
-                                VescTrampaSignalType::VescTrampaCommandFailed,
-                                Some(error_message),
-                            ) {
+                            if let Err(send_error) = self
+                                .send_command_result_signal(
+                                    &command,
+                                    VescTrampaSignalType::VescTrampaCommandFailed,
+                                    Some(error_message),
+                                )
+                                .await
+                            {
                                 error!("Failed to send VESC Trampa command failure signal: {}", send_error);
                             }
                             warn!("VESC Trampa command failed on {}: {}", port_name, error);
@@ -225,7 +231,9 @@ impl VescTrampaPort {
         normfs.unsubscribe(&tx_queue_id, subscription_id);
         drop(cmd_tx);
 
-        if let Err(error) = self.send_board_signal(VescTrampaSignalType::VescTrampaBoardDisconnect)
+        if let Err(error) = self
+            .send_board_signal(VescTrampaSignalType::VescTrampaBoardDisconnect)
+            .await
         {
             error!(
                 "Failed to send VESC Trampa board disconnect signal for {}: {}",
@@ -255,7 +263,7 @@ impl VescTrampaPort {
                 );
 
                 self.values = Some(values);
-                self.send_board_packet_signal(&source_packet)?;
+                self.send_board_packet_signal(&source_packet).await?;
             }
             _ => unreachable!(),
         }
@@ -350,7 +358,7 @@ impl VescTrampaPort {
                 )
                 .into());
             }
-            self.send_board_packet_signal(&response_packet)?;
+            self.send_board_packet_signal(&response_packet).await?;
             return Ok(true);
         }
 
@@ -632,7 +640,7 @@ impl VescTrampaPort {
         self.board_info.firmware_info_raw_payload = info.raw_payload().clone();
     }
 
-    fn send_board_signal(
+    async fn send_board_signal(
         &self,
         signal_type: VescTrampaSignalType,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -645,10 +653,10 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope)
+        self.com.send_rx(&envelope).await
     }
 
-    fn send_board_packet_signal(
+    async fn send_board_packet_signal(
         &self,
         packet: &CommPacket,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -662,26 +670,27 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope)
+        self.com.send_rx(&envelope).await
     }
 
-    fn send_command_received_signal(
+    async fn send_command_received_signal(
         &self,
         command: &TxEnvelope,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send_command_signal(command, VescTrampaSignalType::VescTrampaCommand, None)
+            .await
     }
 
-    fn send_command_result_signal(
+    async fn send_command_result_signal(
         &self,
         command: &TxEnvelope,
         signal_type: VescTrampaSignalType,
         error: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.send_command_signal(command, signal_type, error)
+        self.send_command_signal(command, signal_type, error).await
     }
 
-    fn send_command_signal(
+    async fn send_command_signal(
         &self,
         command: &TxEnvelope,
         signal_type: VescTrampaSignalType,
@@ -698,7 +707,7 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope)
+        self.com.send_rx(&envelope).await
     }
 
     fn to_board_packet_proto(packet: &CommPacket) -> VescTrampaBoardPacket {

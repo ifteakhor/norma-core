@@ -6,6 +6,7 @@ use normfs::NormFS;
 use normfs::UintN;
 use parking_lot::{Condvar, Mutex};
 use prost::Message;
+use station_iface::{QueueWriter, STARTUP_WRITE_TIMEOUT};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -45,7 +46,11 @@ impl Inference {
         Ok(())
     }
 
-    fn notify_startup(normfs: &Arc<NormFS>) -> Result<(), normfs::Error> {
+    /// Names the run, so nothing else can be read without it.
+    async fn notify_startup(
+        normfs: &Arc<NormFS>,
+        writer: &QueueWriter,
+    ) -> Result<(), normfs::Error> {
         let inference_queue_id = normfs.resolve(QUEUE_ID);
         let inference_queue_ptr = match normfs.get_last_id(&inference_queue_id) {
             Ok(id) => id.value_to_bytes(),
@@ -62,13 +67,15 @@ impl Inference {
             inference_queue_ptr,
         };
 
-        let startups_queue_id = normfs.resolve(STARTUPS_QUEUE_ID);
-        normfs.enqueue(&startups_queue_id, Bytes::from(startup.encode_to_vec()))?;
-        Ok(())
+        writer
+            .write_awaiting(Bytes::from(startup.encode_to_vec()), STARTUP_WRITE_TIMEOUT)
+            .await
     }
 
-    pub fn start(normfs: Arc<NormFS>) -> Self {
-        if let Err(e) = Self::notify_startup(&normfs) {
+    pub async fn start(normfs: Arc<NormFS>) -> Result<Self, normfs::Error> {
+        let startups_queue_id = normfs.resolve(STARTUPS_QUEUE_ID);
+        let startups_writer = QueueWriter::open(normfs.clone(), startups_queue_id).await?;
+        if let Err(e) = Self::notify_startup(&normfs, &startups_writer).await {
             log::error!("Failed to publish station startup: {:?}", e);
         }
 
@@ -78,11 +85,11 @@ impl Inference {
         let latest_pointers: Arc<DashMap<String, (UintN, i32)>> = Arc::new(DashMap::new());
 
         let queue_id = normfs.resolve(QUEUE_ID);
+        let worker_normfs = normfs.clone();
+        let worker_queue_id = queue_id.clone();
 
         let worker_signal = signal.clone();
-        let worker_normfs = normfs.clone();
         let worker_pointers = latest_pointers.clone();
-        let worker_queue_id = queue_id.clone();
 
         tokio::task::spawn_blocking(move || {
             let (lock, cvar) = &*worker_signal;
@@ -124,12 +131,10 @@ impl Inference {
                         app_start_id: systime::get_app_start_id(),
                     };
 
-                    match worker_normfs.enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec())) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            log::error!("Failed to enqueue inference state to NormFS: {:?}", e);
-                        }
-                    }
+                    // This thread must not be parked, and the next signal
+                    // rebuilds the snapshot anyway.
+                    let _ = worker_normfs
+                        .try_enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec()));
                 }
 
                 // Re-acquire lock for next iteration
@@ -139,12 +144,12 @@ impl Inference {
             log::info!("Inference worker thread exiting");
         });
 
-        Self {
+        Ok(Self {
             shutdown_tx,
             normfs,
             latest_pointers,
             signal,
-        }
+        })
     }
 
     pub fn register_queue(&self, queue_id: &normfs::QueueId, queue_data_type: i32) {

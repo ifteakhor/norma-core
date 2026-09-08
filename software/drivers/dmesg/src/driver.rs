@@ -38,7 +38,11 @@ impl DmesgDriver {
             None
         };
 
-        let publisher = Publisher { normfs, queue_id };
+        let publisher = Publisher {
+            normfs,
+            queue_id,
+            runtime: tokio::runtime::Handle::current(),
+        };
         let worker = thread::Builder::new()
             .name("dmesg".to_string())
             .spawn(move || run(publisher, resume_after))?;
@@ -91,6 +95,9 @@ pub async fn start_dmesg_driver<T: StationEngine>(
 struct Publisher {
     normfs: Arc<NormFS>,
     queue_id: QueueId,
+    /// This runs on the dmesg thread, not a runtime worker, so it is allowed
+    /// to block on a write that has to wait.
+    runtime: tokio::runtime::Handle,
 }
 
 impl Publisher {
@@ -102,7 +109,17 @@ impl Publisher {
             return;
         }
 
-        if let Err(err) = self.normfs.enqueue(&self.queue_id, Bytes::from(buffer)) {
+        // Diagnostics matter most when the disk is in trouble, and the
+        // reader is rate-limited to 200 records a second, so this waits.
+        let data = Bytes::from(buffer);
+        let sent = match self.normfs.try_enqueue(&self.queue_id, data.clone()) {
+            Err(normfs::Error::WouldBlock) => self
+                .runtime
+                .block_on(self.normfs.enqueue(&self.queue_id, data))
+                .map(|_| ()),
+            other => other.map(|_| ()),
+        };
+        if let Err(err) = sent {
             error!("Failed to enqueue dmesg envelope: {}", err);
         }
     }

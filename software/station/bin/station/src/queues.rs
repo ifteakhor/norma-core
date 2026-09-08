@@ -6,31 +6,40 @@ use station_iface::iface_proto::{
     drivers::QueueDataType,
     envelope::{QueueData, QueueOpt, RootQueueEnvelope, RootQueueEnvelopeType},
 };
+use station_iface::{Backpressure, QueueWriter, STARTUP_WRITE_TIMEOUT};
 use std::sync::Arc;
 
 pub const MAIN_QUEUE_ID: &str = "main";
 
+/// Registrations come through a synchronous trait method that cannot wait, so
+/// the channel is sized to never fill.
+const MAIN_QUEUE_CAPACITY: usize = 256;
+
 pub struct MainQueue {
-    normfs: Arc<NormFS>,
-    queue_id: normfs::QueueId,
+    writer: QueueWriter,
     station_uuid: Bytes,
 }
 
 impl MainQueue {
     pub async fn new(normfs: Arc<NormFS>, station_uuid: Bytes) -> Result<Self> {
         let queue_id = normfs.resolve(MAIN_QUEUE_ID);
-        normfs.ensure_queue_exists_for_write(&queue_id).await?;
+        let writer = QueueWriter::spawn(normfs, queue_id, MAIN_QUEUE_CAPACITY).await?;
 
         Ok(Self {
-            normfs,
-            queue_id,
+            writer,
             station_uuid,
         })
     }
 
-    pub fn send_app_start(&self) -> Result<()> {
+    /// Says which run every later record belongs to.
+    pub async fn send_app_start(&self) -> Result<()> {
         let envelope = self.create_envelope(RootQueueEnvelopeType::RqetAppStart, None);
-        self.send_envelope(envelope)
+        let mut buf = Vec::new();
+        envelope.encode(&mut buf)?;
+        self.writer
+            .write_awaiting(Bytes::from(buf), STARTUP_WRITE_TIMEOUT)
+            .await?;
+        Ok(())
     }
 
     pub fn send_queue_start(
@@ -68,9 +77,7 @@ impl MainQueue {
     fn send_envelope(&self, envelope: RootQueueEnvelope) -> Result<()> {
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
-
-        self.normfs.enqueue(&self.queue_id, Bytes::from(buf))?;
-
+        self.writer.write(Bytes::from(buf), Backpressure::Keep);
         Ok(())
     }
 }

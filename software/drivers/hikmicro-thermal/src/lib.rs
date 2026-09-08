@@ -121,14 +121,18 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
                         running.lock().unwrap().remove(&camera.unique_id);
                         continue;
                     }
+                    let sink = Sink {
+                        normfs: normfs.clone(),
+                        queue_id: queue_id.clone(),
+                        runtime: tokio::runtime::Handle::current(),
+                    };
                     station_engine.register_queue(
                         &queue_id,
                         QueueDataType::QdtHikmicroThermal,
                         vec![],
                     );
 
-                    let normfs_capture = normfs.clone();
-                    let queue_id_capture = queue_id.clone();
+                    let sink_capture = sink;
                     let stop_capture = stop.clone();
                     let running_capture = running.clone();
                     let unique_id = camera.unique_id.clone();
@@ -138,8 +142,7 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
                     captures.spawn(async move {
                         let result = run_camera_capture(
                             camera,
-                            normfs_capture,
-                            queue_id_capture,
+                            sink_capture,
                             stop_capture,
                             timeout,
                             frame_skip,
@@ -182,35 +185,26 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
 #[cfg(target_os = "linux")]
 async fn run_camera_capture(
     camera: CameraIdentity,
-    normfs: Arc<NormFS>,
-    queue_id: normfs::QueueId,
+    sink: Sink,
     stop: Arc<AtomicBool>,
     frame_timeout: Duration,
     frame_skip: u32,
 ) -> Result<(), String> {
     let device_info_camera = camera.clone();
-    let device_info_normfs = normfs.clone();
-    let device_info_queue_id = queue_id.clone();
+    let device_info_sink = sink.clone();
     let device_info = tokio::task::spawn_blocking(move || {
-        linux::enqueue_device_info(
-            &device_info_camera,
-            device_info_normfs.as_ref(),
-            &device_info_queue_id,
-        )
+        linux::enqueue_device_info(&device_info_camera, &device_info_sink)
     })
     .await
     .map_err(|e| format!("HIKMICRO device-info task failed: {}", e))??;
 
     let capture_camera = camera.clone();
-    let capture_normfs = normfs.clone();
-    let capture_queue_id = queue_id.clone();
     let capture_stop = stop.clone();
     tokio::task::spawn_blocking(move || {
         linux::capture_continuous(
             &capture_camera,
             device_info,
-            capture_normfs.as_ref(),
-            &capture_queue_id,
+            &sink,
             capture_stop.as_ref(),
             frame_timeout,
             frame_skip,
@@ -261,17 +255,36 @@ pub struct CameraIdentity {
     pub unique_id: String,
 }
 
+/// Where a capture thread writes. Capture runs on `spawn_blocking`, so this
+/// is allowed to block on a record that has to wait.
+#[derive(Clone)]
+pub(crate) struct Sink {
+    pub(crate) normfs: Arc<NormFS>,
+    pub(crate) queue_id: normfs::QueueId,
+    pub(crate) runtime: tokio::runtime::Handle,
+}
+
+/// The blocks cannot be read without the device info, so that one waits.
 fn enqueue_envelope(
-    normfs: &NormFS,
-    queue_id: &normfs::QueueId,
+    sink: &Sink,
     envelope: hikmicro_proto::hikmicro::RxEnvelope,
 ) -> Result<(), String> {
+    let frames = envelope.frames.is_some();
     let mut buf = BytesMut::new();
     envelope.encode(&mut buf).map_err(|e| e.to_string())?;
-    normfs
-        .enqueue(queue_id, buf.freeze())
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let data = buf.freeze();
+
+    if frames {
+        match sink.normfs.try_enqueue(&sink.queue_id, data) {
+            Ok(_) | Err(normfs::Error::WouldBlock) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        sink.runtime
+            .block_on(sink.normfs.enqueue(&sink.queue_id, data))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 fn compact_layout() -> hikmicro_proto::hikmicro::CompactPayloadLayout {

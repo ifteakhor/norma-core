@@ -3,41 +3,59 @@ use crate::yahboom_dogzilla_lite_proto::{
 };
 use bytes::{Bytes, BytesMut};
 use log::warn;
-use normfs::{NormFS, UintN};
+use normfs::NormFS;
 use prost::Message;
+use station_iface::{Backpressure, QueueWriter};
 use std::sync::Arc;
 
 type SendResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub(crate) struct YahboomDogzillaLiteCommunicator {
     pub(crate) normfs: Arc<NormFS>,
-    pub(crate) rx_queue_id: normfs::QueueId,
     pub(crate) tx_queue_id: normfs::QueueId,
-    pub(crate) inference_queue_id: normfs::QueueId,
+    rx_writer: QueueWriter,
+    tx_writer: QueueWriter,
+    inference_writer: QueueWriter,
     inference_states_queue_id: normfs::QueueId,
     state: Arc<parking_lot::RwLock<InferenceState>>,
 }
 
 impl YahboomDogzillaLiteCommunicator {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         normfs: Arc<NormFS>,
         rx_queue_id: normfs::QueueId,
         tx_queue_id: normfs::QueueId,
         inference_queue_id: normfs::QueueId,
-    ) -> Self {
+    ) -> Result<Self, normfs::Error> {
         let inference_states_queue_id = normfs.resolve("inference-states");
-        Self {
+        let rx_writer = QueueWriter::open(normfs.clone(), rx_queue_id).await?;
+        let tx_writer = QueueWriter::open(normfs.clone(), tx_queue_id.clone()).await?;
+        let inference_writer = QueueWriter::open(normfs.clone(), inference_queue_id).await?;
+        Ok(Self {
             normfs,
-            rx_queue_id,
             tx_queue_id,
-            inference_queue_id,
+            rx_writer,
+            tx_writer,
+            inference_writer,
             inference_states_queue_id,
             state: Arc::new(parking_lot::RwLock::new(InferenceState::default())),
+        })
+    }
+
+    fn rx_policy(signal_type: i32) -> Backpressure {
+        match YahboomDogzillaLiteSignalType::try_from(signal_type) {
+            Ok(YahboomDogzillaLiteSignalType::YahboomDogzillaLiteStatusUpdate) => {
+                Backpressure::Skip
+            }
+            _ => Backpressure::Keep,
         }
     }
 
     pub(crate) fn send_rx(&self, envelope: &RxEnvelope) -> SendResult<()> {
-        self.send_envelope(&self.rx_queue_id, envelope)?;
+        self.rx_writer.write(
+            Self::encode(envelope)?,
+            Self::rx_policy(envelope.signal_type),
+        );
         if let Err(e) = self.update_state(envelope) {
             warn!("Failed to update YAHBOOM_DOGZILLA_LITE inference state: {}", e);
         }
@@ -45,18 +63,15 @@ impl YahboomDogzillaLiteCommunicator {
     }
 
     pub(crate) fn send_tx(&self, envelope: &TxEnvelope) -> SendResult<()> {
-        self.send_envelope(&self.tx_queue_id, envelope)?;
+        self.tx_writer
+            .write(Self::encode(envelope)?, Backpressure::Keep);
         Ok(())
     }
 
-    fn send_envelope<M: Message>(
-        &self,
-        queue_id: &normfs::QueueId,
-        envelope: &M,
-    ) -> SendResult<UintN> {
+    fn encode<M: Message>(envelope: &M) -> SendResult<Bytes> {
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
-        Ok(self.normfs.enqueue(queue_id, Bytes::from(buf))?)
+        Ok(Bytes::from(buf))
     }
 
     fn add_device(&self, device: &YahboomDogzillaLiteDevice, envelope: &RxEnvelope) {
@@ -143,11 +158,13 @@ impl YahboomDogzillaLiteCommunicator {
     }
 
     fn publish_state(&self) -> SendResult<()> {
-        let state = self.state.read();
         let mut buf = Vec::new();
-        state.encode(&mut buf)?;
-        self.normfs
-            .enqueue(&self.inference_queue_id, Bytes::from(buf))?;
+        {
+            let state = self.state.read();
+            state.encode(&mut buf)?;
+        }
+        self.inference_writer
+            .write(Bytes::from(buf), Backpressure::Skip);
         Ok(())
     }
 

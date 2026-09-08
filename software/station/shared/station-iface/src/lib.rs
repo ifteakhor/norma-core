@@ -1,9 +1,11 @@
 pub mod config;
 mod traits;
+mod writer;
 
 pub const COMMANDS_QUEUE_ID: &str = "commands";
 
 pub use traits::*;
+pub use writer::*;
 
 pub mod iface_proto {
     pub mod drivers {
