@@ -914,44 +914,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inference = inference::Inference::start(station.normfs.clone()).await?;
     *station.engine.inference.lock() = Some(inference);
 
-    station.start_drivers().await?;
-    log::info!("Drivers started");
-
-    let mut server_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if let Some(tcp_addr_str) = args.tcp {
-        let tcp_addr: SocketAddr = tcp_addr_str
-            .parse()
-            .or_else(|_| format!("0.0.0.0:{}", tcp_addr_str).parse())
-            .map_err(|e| format!("Invalid address '{}': {}", tcp_addr_str, e))?;
-
-        server_handle = Some(station.start_server(tcp_addr).await?);
-    }
-
-    let web_shutdown = Arc::new(AtomicBool::new(false));
-    let mut web_server_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if let Some(web_addr_str) = args.web {
-        let web_addr: SocketAddr = web_addr_str
-            .parse()
-            .or_else(|_| format!("0.0.0.0:{}", web_addr_str).parse())
-            .map_err(|e| format!("Invalid address '{}': {}", web_addr_str, e))?;
-
-        let listener = bind_retrying("Web server", web_addr, || {
-            tokio::net::TcpListener::bind(web_addr)
-        })
-        .await?;
-
-        let normfs_clone = station.normfs.clone();
-        let web_shutdown_clone = web_shutdown.clone();
-        let static_path = args.static_path.clone();
-        web_server_handle = Some(tokio::spawn(async move {
-            if let Err(e) =
-                web::server::start_server(listener, normfs_clone, web_shutdown_clone, static_path)
-                    .await
-            {
-                log::error!("Web server error: {}", e);
-            }
-        }));
-    }
+    let services = match start_services(&station, &args).await {
+        Ok(services) => services,
+        Err(e) => {
+            log::error!("Startup failed: {}", e);
+            shutdown_station(&station, None).await?;
+            return Err(e);
+        }
+    };
 
     // On macOS, periodically tick the main run loop for AVFoundation notifications
     // This MUST run on the main thread, so we use select! instead of spawn
@@ -978,31 +948,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("\nShutting down...");
     }
 
-    if let Some(handle) = web_server_handle {
-        log::info!("Shutting down web server...");
-        web_shutdown.store(true, Ordering::Relaxed);
-        if let Err(e) = handle.await {
-            log::error!("Web server shutdown error: {}", e);
-        } else {
-            log::info!("Web server shut down.");
-        }
+    shutdown_station(&station, Some(services)).await?;
+    log::info!("Data persisted at: {:?}", args.normfs_base_folder);
+
+    Ok(())
+}
+
+struct Services {
+    server: Option<tokio::task::JoinHandle<()>>,
+    web: Option<tokio::task::JoinHandle<()>>,
+    web_shutdown: Arc<AtomicBool>,
+}
+
+async fn start_services(
+    station: &Station,
+    args: &Args,
+) -> Result<Services, Box<dyn std::error::Error>> {
+    station.start_drivers().await?;
+    log::info!("Drivers started");
+
+    let mut server_handle = None;
+    if let Some(tcp_addr_str) = args.tcp.as_deref() {
+        let tcp_addr: SocketAddr = tcp_addr_str
+            .parse()
+            .or_else(|_| format!("0.0.0.0:{}", tcp_addr_str).parse())
+            .map_err(|e| format!("Invalid address '{}': {}", tcp_addr_str, e))?;
+
+        server_handle = Some(station.start_server(tcp_addr).await?);
     }
 
-    if let Some(handle) = server_handle {
-        log::info!("Shutting down TCP server...");
-        handle.abort();
-        log::info!("TCP server shut down.");
+    let web_shutdown = Arc::new(AtomicBool::new(false));
+    let mut web_server_handle = None;
+    if let Some(web_addr_str) = args.web.as_deref() {
+        let web_addr: SocketAddr = web_addr_str
+            .parse()
+            .or_else(|_| format!("0.0.0.0:{}", web_addr_str).parse())
+            .map_err(|e| format!("Invalid address '{}': {}", web_addr_str, e))?;
+
+        let listener = bind_retrying("Web server", web_addr, || {
+            tokio::net::TcpListener::bind(web_addr)
+        })
+        .await?;
+
+        let normfs_clone = station.normfs.clone();
+        let web_shutdown_clone = web_shutdown.clone();
+        let static_path = args.static_path.clone();
+        web_server_handle = Some(tokio::spawn(async move {
+            if let Err(e) =
+                web::server::start_server(listener, normfs_clone, web_shutdown_clone, static_path)
+                    .await
+            {
+                log::error!("Web server error: {}", e);
+            }
+        }));
+    }
+
+    Ok(Services {
+        server: server_handle,
+        web: web_server_handle,
+        web_shutdown,
+    })
+}
+
+/// Also the path out of a failed startup: the camera capture threads only
+/// stop through here, and dropping the runtime waits for them.
+async fn shutdown_station(
+    station: &Station,
+    services: Option<Services>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(services) = services {
+        if let Some(handle) = services.web {
+            log::info!("Shutting down web server...");
+            services.web_shutdown.store(true, Ordering::Relaxed);
+            if let Err(e) = handle.await {
+                log::error!("Web server shutdown error: {}", e);
+            } else {
+                log::info!("Web server shut down.");
+            }
+        }
+
+        if let Some(handle) = services.server {
+            log::info!("Shutting down TCP server...");
+            handle.abort();
+            log::info!("TCP server shut down.");
+        }
     }
 
     if let Some(inference) = station.engine.inference.lock().as_ref() {
         inference.shutdown();
     }
 
-    station.shutdown().await?;
-
-    log::info!("Data persisted at: {:?}", args.normfs_base_folder);
-
-    Ok(())
+    station.shutdown().await
 }
 
 #[cfg(test)]
