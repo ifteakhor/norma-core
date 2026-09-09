@@ -200,49 +200,64 @@ struct Engine {
 
 /// Kept separate so the queue-to-pool mapping can be unit tested.
 fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
-    // Rules are matched against the absolute queue id `/<instance_id>/<path>`, so every pattern
-    // needs a leading `*`.
+    use CompressionType::{None as Raw, Zstd};
+    use PoolKind::{Active, Passive};
+
+    // Rules are matched against the absolute queue id `/<instance_id>/<path>`, first match wins,
+    // so every pattern needs a leading `*`.
     //
-    // The pool determines the page size, and a record larger than one page is rejected: 256 KiB for
-    // active, 32 KiB for passive.
-    let active = |compression_type, enable_fsync| QueueConfig {
-        compression_type,
-        enable_fsync,
-        encryption_type: EncryptionType::Aes,
-        pool: PoolKind::Active,
-    };
+    // The pool sets the page size, and a record larger than one page is rejected. Active: 256 KiB
+    // pages, for wide records and streams. Passive: 32 KiB pages, for queues that see a few small
+    // records a second or less.
+    let rules = [
+        // (pattern, pool, compression, fsync)
+        // Camera commands; listed first so `*video/*` does not take it.
+        ("*/usbvideo/tx", Passive, Zstd, true),
+        // Wide records: frames, thermal images, kernel logs, inference frames, system info.
+        ("*video/*", Active, Raw, false),
+        ("*/hikmicro-thermal/*", Active, Zstd, false),
+        ("*dmesg/*", Active, Zstd, false),
+        ("*/inference-states", Active, Raw, false),
+        ("*/inference/*", Active, Raw, false),
+        ("*/*/inference", Active, Raw, false),
+        ("*/system/rx", Active, Zstd, true),
+        ("*/st3215/meta", Active, Zstd, true),
+        // Streams: motor polling and commands at 50-100 Hz.
+        ("*/st3215/rx", Active, Zstd, true),
+        ("*/st3215/tx", Active, Zstd, true),
+        ("*/vesc-trampa/rx", Active, Zstd, true),
+        ("*/vesc-trampa/tx", Active, Zstd, true),
+        ("*/yahboom-dogzilla-lite/rx", Active, Zstd, true),
+        ("*/yahboom-dogzilla-lite/tx", Active, Zstd, true),
+        ("*/pwm-output/rx", Active, Zstd, true),
+        ("*/pwm-output/tx", Active, Zstd, true),
+        ("*/commands", Active, Zstd, true),
+        // Station bookkeeping: app starts, queue registrations, inference startups, tags.
+        ("*/main", Passive, Zstd, true),
+        ("*/startups", Passive, Zstd, true),
+        ("*/inference-tags/rx", Passive, Zstd, true),
+        ("*/motors_mirroring/modes", Passive, Zstd, true),
+        // Sensors polled once a second.
+        ("*/arduino-nicla-sense-env/rx", Passive, Zstd, true),
+        ("*/ina226/*/rx", Passive, Zstd, true),
+        ("*/airgradient-open-air-o-1pst/*/rx", Passive, Zstd, true),
+        ("*/victron-smartsolar-mppt/*/rx", Passive, Zstd, true),
+    ];
 
     QueueSettings::new(
-        vec![
-            // usbvideo/<hash> and video/ov5647.
-            ("*video/*".to_string(), active(CompressionType::None, false)),
-            (
-                "*/hikmicro-thermal/*".to_string(),
-                active(CompressionType::Zstd, false),
-            ),
-            ("*dmesg/*".to_string(), active(CompressionType::Zstd, false)),
-            (
-                "*/inference-states".to_string(),
-                active(CompressionType::None, false),
-            ),
-            (
-                "*/inference/*".to_string(),
-                active(CompressionType::None, false),
-            ),
-            (
-                "*/*/inference".to_string(),
-                active(CompressionType::None, false),
-            ),
-            (
-                "*/system/rx".to_string(),
-                active(CompressionType::Zstd, true),
-            ),
-            (
-                "*/st3215/meta".to_string(),
-                active(CompressionType::Zstd, true),
-            ),
-        ],
-        QueueConfig::default(), // default config for all other queues
+        rules
+            .iter()
+            .map(|&(pattern, pool, compression_type, enable_fsync)| {
+                let config = QueueConfig {
+                    compression_type,
+                    enable_fsync,
+                    encryption_type: EncryptionType::Aes,
+                    pool,
+                };
+                (pattern.to_string(), config)
+            })
+            .collect(),
+        QueueConfig::default(), // passive, for queues not listed above
     )
     .map_err(Into::into)
 }
@@ -1051,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn queues_with_wide_records_draw_from_the_active_arena() {
+    fn wide_records_and_streams_draw_from_the_active_arena() {
         for queue in [
             "/inst123/usbvideo/9f86d081884c7d65",
             "/inst123/video/ov5647",
@@ -1065,6 +1080,15 @@ mod tests {
             "/inst123/st3215/inference",
             "/inst123/vesc-trampa/inference",
             "/inst123/yahboom-dogzilla-lite/inference",
+            "/inst123/st3215/rx",
+            "/inst123/st3215/tx",
+            "/inst123/vesc-trampa/rx",
+            "/inst123/vesc-trampa/tx",
+            "/inst123/yahboom-dogzilla-lite/rx",
+            "/inst123/yahboom-dogzilla-lite/tx",
+            "/inst123/pwm-output/rx",
+            "/inst123/pwm-output/tx",
+            "/inst123/commands",
         ] {
             assert_eq!(pool_for(queue), PoolKind::Active, "{queue}");
         }
@@ -1075,11 +1099,13 @@ mod tests {
         for queue in [
             "/inst123/main",
             "/inst123/startups",
-            "/inst123/commands",
             "/inst123/inference-tags/rx",
-            "/inst123/st3215/rx",
-            "/inst123/st3215/tx",
+            "/inst123/motors_mirroring/modes",
+            "/inst123/usbvideo/tx",
+            "/inst123/arduino-nicla-sense-env/rx",
             "/inst123/ina226/i2c-1-0x40/rx",
+            "/inst123/airgradient-open-air-o-1pst/usb-1-2/rx",
+            "/inst123/victron-smartsolar-mppt/HQ2222ABCDE/rx",
         ] {
             assert_eq!(pool_for(queue), PoolKind::Passive, "{queue}");
         }
