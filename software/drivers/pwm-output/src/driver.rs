@@ -312,7 +312,6 @@ fn send_rx(
     }
 }
 
-/// Encodes the RX envelope; logs and returns `None` on encode failure.
 fn rx_envelope(
     signal_type: PwmOutputSignalType,
     device: Option<PwmOutputDevice>,

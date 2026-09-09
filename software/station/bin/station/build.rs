@@ -50,7 +50,7 @@ fn main() -> Result<()> {
 
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
 
-    // Rerun when the checked-out commit changes, or the hash goes stale.
+    // Rerun when HEAD moves so the hash stays current.
     let git_dir = Path::new("../../../../.git");
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))

@@ -175,8 +175,7 @@ impl ST3215BusCommunicator {
         Bytes::from(envelope_buf)
     }
 
-    /// A skipped record does not update the inference state, so its pointers keep referring to the
-    /// last record written.
+    /// A skipped record does not update the inference state.
     pub async fn send_rx(
         &self,
         envelope: &st3215_proto::RxEnvelope,
@@ -199,7 +198,6 @@ impl ST3215BusCommunicator {
         Ok(())
     }
 
-    /// Drive states and servo errors are periodic; everything else must not be dropped.
     fn rx_policy(signal_type: i32) -> Backpressure {
         match st3215_proto::St3215SignalType::try_from(signal_type) {
             Ok(st3215_proto::St3215SignalType::St3215DriveState)
@@ -551,7 +549,6 @@ impl ST3215BusCommunicator {
         Bytes::from(buf)
     }
 
-    /// Uses the policy of the rx record that triggered the update.
     async fn publish_inference_state(&self, policy: Backpressure) {
         let data = self.encode_inference_state();
         if let Err(e) = enqueue_with(&self.normfs, &self.inference_queue_id, data, policy).await {
@@ -559,8 +556,7 @@ impl ST3215BusCommunicator {
         }
     }
 
-    /// Synchronous variant for the calibration paths, some of which run inside the meta subscriber
-    /// callback.
+    /// Synchronous; some calibration paths run inside the meta subscriber callback.
     fn publish_inference_state_now(&self) {
         let data = self.encode_inference_state();
         if let Err(e) = try_enqueue_with(

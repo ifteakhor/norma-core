@@ -237,7 +237,7 @@ impl<T: StationEngine> StateTracker<T> {
 
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf).unwrap();
-        // Must not block the capture thread. A full queue is expected; other errors are logged.
+        // Runs on the capture thread; must not block.
         if let Err(e) = self.normfs.try_enqueue(queue_id, buf.freeze())
             && !matches!(e, normfs::Error::WouldBlock)
         {

@@ -265,7 +265,6 @@ impl VescTrampaCommunicator {
         }
     }
 
-    /// Uses the policy of the rx record that triggered the update.
     async fn publish_inference_state(&self, policy: Backpressure) {
         let mut buf = Vec::new();
         self.state.read().state.encode(&mut buf).unwrap();

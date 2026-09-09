@@ -51,8 +51,7 @@ impl YahboomDogzillaLiteCommunicator {
         }
     }
 
-    /// All writes here are synchronous (the command path runs inside the tx subscriber callback),
-    /// so none block.
+    /// The command path runs inside the tx subscriber callback; nothing here blocks.
     pub(crate) fn send_rx(&self, envelope: &RxEnvelope) -> SendResult<()> {
         let policy = Self::rx_policy(envelope.signal_type);
         try_enqueue_with(&self.normfs, &self.rx_queue_id, Self::encode(envelope)?, policy)?;
@@ -156,7 +155,6 @@ impl YahboomDogzillaLiteCommunicator {
         self.publish_state(policy)
     }
 
-    /// Uses the policy of the rx record that triggered the update.
     fn publish_state(&self, policy: Backpressure) -> SendResult<()> {
         let mut buf = Vec::new();
         {

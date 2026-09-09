@@ -371,7 +371,6 @@ impl<T: StationEngine> VictronPort<T> {
             error!("Failed to encode Victron SmartSolar MPPT envelope: {err}");
             return;
         }
-        // Text blocks and hex frames are a stream; connect/disconnect/error must not be dropped.
         let policy = if matches!(
             signal_type,
             VictronSignalType::VictronTextBlock | VictronSignalType::VictronHexFrame

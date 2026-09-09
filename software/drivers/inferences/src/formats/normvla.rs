@@ -197,7 +197,6 @@ pub async fn generate_frame(
 
     let encoded_frame = Bytes::from(frame.encode_to_vec());
 
-    // Frames are periodic; skip on a full queue.
     if let Err(e) = normfs.try_enqueue(&output_queue_id, encoded_frame.clone())
         && !matches!(e, normfs::Error::WouldBlock)
     {

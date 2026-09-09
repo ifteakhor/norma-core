@@ -303,7 +303,6 @@ impl VescTrampaPort {
                 );
 
                 self.values = Some(values);
-                // Superseded by the next tick.
                 self.send_board_packet_signal(&source_packet, Backpressure::Skip)
                     .await?;
             }
@@ -413,7 +412,6 @@ impl VescTrampaPort {
                 )
                 .into());
             }
-            // The command's only response; must not be dropped.
             self.send_board_packet_signal(&response_packet, Backpressure::Keep)
                 .await?;
             return Ok(CommandProcessResult {

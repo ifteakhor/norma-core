@@ -257,7 +257,6 @@ async fn send_board_signal(
     }
     let data = Bytes::from(buffer);
 
-    // Snapshots are periodic; connect/disconnect/error must not be dropped.
     let policy =
         if signal_type == ArduinoNiclaSenseEnvSignalType::ArduinoNiclaSenseEnvRegistersSnapshot {
             Backpressure::Skip

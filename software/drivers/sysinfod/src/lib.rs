@@ -116,7 +116,6 @@ impl SystemMonitor {
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
 
-        // Snapshots are periodic; skip on a full queue.
         if let Err(e) = self.normfs.try_enqueue(&self.queue_id, Bytes::from(buf))
             && !matches!(e, normfs::Error::WouldBlock)
         {

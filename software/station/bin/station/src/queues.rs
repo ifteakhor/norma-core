@@ -29,7 +29,6 @@ impl MainQueue {
         })
     }
 
-    /// Publishes the app-start record that identifies this run.
     pub async fn send_app_start(&self) -> Result<()> {
         let envelope = self.create_envelope(RootQueueEnvelopeType::RqetAppStart, None);
         let mut buf = Vec::new();

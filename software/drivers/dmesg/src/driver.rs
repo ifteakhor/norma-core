@@ -97,7 +97,7 @@ pub async fn start_dmesg_driver<T: StationEngine>(
 struct Publisher {
     normfs: Arc<NormFS>,
     queue_id: QueueId,
-    /// Used to block on writes from the dmesg thread, which is not a runtime worker.
+    /// The dmesg thread is not a runtime worker; writes block on this.
     runtime: tokio::runtime::Handle,
 }
 
@@ -110,7 +110,6 @@ impl Publisher {
             return;
         }
 
-        // Wait for a free page, but not indefinitely.
         let sent = self.runtime.block_on(tokio::time::timeout(
             WRITE_TIMEOUT,
             self.normfs.enqueue(&self.queue_id, Bytes::from(buffer)),

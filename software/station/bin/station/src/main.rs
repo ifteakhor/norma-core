@@ -198,22 +198,18 @@ struct Engine {
     inference: Mutex<Option<inference::Inference>>,
 }
 
-/// Kept separate so the queue-to-pool mapping can be unit tested.
 fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
     use CompressionType::{None as Raw, Zstd};
     use PoolKind::{Active, Passive};
 
-    // Rules are matched against the absolute queue id `/<instance_id>/<path>`, first match wins,
-    // so every pattern needs a leading `*`.
-    //
-    // The pool sets the page size, and a record larger than one page is rejected. Active: 256 KiB
-    // pages, for wide records and streams. Passive: 32 KiB pages, for queues that see a few small
-    // records a second or less.
+    // Matched against the absolute id `/<instance_id>/<path>`, first match wins, so every
+    // pattern starts with `*`. The pool sets the page size and with it the largest record:
+    // 256 KiB active, 32 KiB passive.
     let rules = [
         // (pattern, pool, compression, fsync)
-        // Camera commands; listed first so `*video/*` does not take it.
+        // Before `*video/*`, which would match it.
         ("*/usbvideo/tx", Passive, Zstd, true),
-        // Wide records: frames, thermal images, kernel logs, inference frames, system info.
+        // Wide records.
         ("*video/*", Active, Raw, false),
         ("*/hikmicro-thermal/*", Active, Zstd, false),
         ("*dmesg/*", Active, Zstd, false),
@@ -222,7 +218,7 @@ fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
         ("*/*/inference", Active, Raw, false),
         ("*/system/rx", Active, Zstd, true),
         ("*/st3215/meta", Active, Zstd, true),
-        // Streams: motor polling and commands at 50-100 Hz.
+        // 50-100 Hz streams.
         ("*/st3215/rx", Active, Zstd, true),
         ("*/st3215/tx", Active, Zstd, true),
         ("*/vesc-trampa/rx", Active, Zstd, true),
@@ -232,12 +228,12 @@ fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
         ("*/pwm-output/rx", Active, Zstd, true),
         ("*/pwm-output/tx", Active, Zstd, true),
         ("*/commands", Active, Zstd, true),
-        // Station bookkeeping: app starts, queue registrations, inference startups, tags.
+        // Rare records.
         ("*/main", Passive, Zstd, true),
         ("*/startups", Passive, Zstd, true),
         ("*/inference-tags/rx", Passive, Zstd, true),
         ("*/motors_mirroring/modes", Passive, Zstd, true),
-        // Sensors polled once a second.
+        // 1 Hz sensors.
         ("*/arduino-nicla-sense-env/rx", Passive, Zstd, true),
         ("*/ina226/*/rx", Passive, Zstd, true),
         ("*/airgradient-open-air-o-1pst/*/rx", Passive, Zstd, true),
@@ -389,7 +385,6 @@ impl Station {
     async fn start_main_queue(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let main_queue =
             MainQueue::new(self.normfs.clone(), self.normfs.get_instance_id_bytes()).await?;
-        // Not fatal.
         if let Err(e) = main_queue.send_app_start().await {
             log::error!("Failed to record the app start: {}", e);
         }
@@ -1026,8 +1021,7 @@ async fn start_services(
     })
 }
 
-/// Also the path out of a failed startup: the camera capture threads only
-/// stop through here, and dropping the runtime waits for them.
+/// Also runs after a failed startup; dropping the runtime would wait on the capture threads.
 async fn shutdown_station(
     station: &Station,
     services: Option<Services>,
@@ -1111,7 +1105,7 @@ mod tests {
         }
     }
 
-    /// Regression test: a rule without a leading `*` never matches an absolute id.
+    /// A rule without a leading `*` never matches an absolute id.
     #[test]
     fn a_rule_without_a_leading_star_matches_no_absolute_id() {
         let settings = QueueSettings::new(

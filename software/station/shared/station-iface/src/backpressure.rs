@@ -6,10 +6,9 @@
 //! may be skipped, while one-off records (connect, disconnect, registrations,
 //! command echoes) must be kept.
 //!
-//! Kept records wait only where the caller can. Async tasks await with a
-//! timeout. Subscriber callbacks run while the source queue holds its append
-//! gate, and capture threads must not stall, so those try once and log a
-//! refusal.
+//! Async tasks wait with a timeout. Subscriber callbacks run under the
+//! source queue's append gate and capture threads must not stall, so those
+//! try once and log a refusal.
 
 use std::time::Duration;
 

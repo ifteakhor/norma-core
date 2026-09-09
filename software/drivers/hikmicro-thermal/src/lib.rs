@@ -260,7 +260,7 @@ pub struct CameraIdentity {
     pub unique_id: String,
 }
 
-/// Write target for the capture thread, which runs on `spawn_blocking` and may block.
+/// Write target for the capture thread, which runs on `spawn_blocking`.
 #[derive(Clone)]
 pub(crate) struct Sink {
     pub(crate) normfs: Arc<NormFS>,
@@ -268,7 +268,6 @@ pub(crate) struct Sink {
     pub(crate) runtime: tokio::runtime::Handle,
 }
 
-/// Frame blocks are skipped when the queue is full; device info is required by readers and waits.
 fn enqueue_envelope(
     sink: &Sink,
     envelope: hikmicro_proto::hikmicro::RxEnvelope,

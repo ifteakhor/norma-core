@@ -61,8 +61,7 @@ pub struct USBVideoManager<K: USBCameraDriver> {
     normfs: Arc<NormFS>,
     command_subscription: Mutex<Option<(normfs::QueueId, usize)>>,
     stopped: Arc<AtomicBool>,
-    /// One task per connected camera. `stop` waits for them so the disconnect
-    /// record and the queue close land before NormFS closes.
+    /// One task per camera; `stop` waits for them before NormFS closes.
     cameras: Arc<Mutex<JoinSet<()>>>,
 }
 

@@ -310,7 +310,6 @@ async fn send_device_signal(
     }
     let data = Bytes::from(buffer);
 
-    // Snapshots are periodic; connect/disconnect/error must not be dropped.
     let policy = if signal_type == Ina226SignalType::Ina226RegistersSnapshot {
         Backpressure::Skip
     } else {

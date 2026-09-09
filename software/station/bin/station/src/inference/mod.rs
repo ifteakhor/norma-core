@@ -23,8 +23,7 @@ pub struct Inference {
     signal: InferenceSignal,
 }
 
-/// Stops the worker on drop. Dropping the runtime waits for `spawn_blocking` threads, so an early
-/// error in `main` would otherwise hang.
+/// Stops the worker on drop; otherwise a failed startup hangs on the runtime drop.
 impl Drop for Inference {
     fn drop(&mut self) {
         self.shutdown();
@@ -111,7 +110,6 @@ impl Inference {
                     cvar.wait(&mut signaled);
                 }
 
-                // Stop on an explicit signal or when the sender is dropped.
                 if !matches!(
                     shutdown_rx.try_recv(),
                     Err(mpsc::error::TryRecvError::Empty)
@@ -144,7 +142,6 @@ impl Inference {
                         app_start_id: systime::get_app_start_id(),
                     };
 
-                    // Skip on a full queue; the next signal republishes.
                     if let Err(e) =
                         worker_normfs.try_enqueue(&worker_queue_id, Bytes::from(rx.encode_to_vec()))
                         && !matches!(e, normfs::Error::WouldBlock)
