@@ -5,7 +5,7 @@ use log::{error, info};
 use normfs::{NormFS, QueueId};
 use prost::Message;
 use station_iface::iface_proto::drivers::QueueDataType;
-use station_iface::{StationEngine, WRITE_TIMEOUT};
+use station_iface::{StationEngine, WRITE_TIMEOUT, enqueue_waiting};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -110,17 +110,14 @@ impl Publisher {
             return;
         }
 
-        let sent = self.runtime.block_on(tokio::time::timeout(
+        // The timeout must be created inside the runtime, so it lives in the future.
+        if let Err(err) = self.runtime.block_on(enqueue_waiting(
+            &self.normfs,
+            &self.queue_id,
+            Bytes::from(buffer),
             WRITE_TIMEOUT,
-            self.normfs.enqueue(&self.queue_id, Bytes::from(buffer)),
-        ));
-        match sent {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => error!("Failed to enqueue dmesg envelope: {}", err),
-            Err(_) => error!(
-                "Failed to enqueue dmesg envelope: no page became free within {:?}",
-                WRITE_TIMEOUT
-            ),
+        )) {
+            error!("Failed to enqueue dmesg envelope: {}", err);
         }
     }
 
@@ -386,5 +383,44 @@ impl RateLimiter {
 
         self.count += 1;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use normfs::{NormFsSettings, PersistenceMode};
+
+    /// The worker is a plain thread, so `publish` must not create timers
+    /// outside `block_on`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_works_from_a_plain_thread() {
+        let dir = std::env::temp_dir().join(format!("dmesg-publish-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = NormFsSettings {
+            persistence_mode: PersistenceMode::MemoryOnly,
+            ..Default::default()
+        };
+        let normfs = Arc::new(NormFS::new(dir.clone(), settings).await.unwrap());
+        let queue_id = normfs.resolve(QUEUE_ID);
+        normfs
+            .ensure_queue_exists_for_write(&queue_id)
+            .await
+            .unwrap();
+
+        let publisher = Publisher {
+            normfs: normfs.clone(),
+            queue_id: queue_id.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        };
+        thread::spawn(move || publisher.publish(RxEnvelope::default()))
+            .join()
+            .expect("publish panicked");
+
+        assert_eq!(
+            normfs.get_last_id(&queue_id).unwrap(),
+            normfs::UintN::from(0u64)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
