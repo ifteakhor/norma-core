@@ -59,6 +59,9 @@ impl From<NormFsPersistenceMode> for PersistenceMode {
 
 /// Page size of the active pool, and with it the largest record.
 const ACTIVE_PAGE_SIZE: usize = 4 * 1024 * 1024;
+/// How long a record can sit in memory before the WAL writes it. A full page
+/// and the close write at once.
+const WAL_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// NormaCore.Dev station: physical operations platform
 #[derive(Parser, Debug)]
@@ -331,6 +334,7 @@ impl Station {
             ..Default::default()
         };
         settings.wal_settings.max_file_size = args.normfs_file_size;
+        settings.wal_settings.write_interval = WAL_WRITE_INTERVAL;
         settings.wal_settings.write_buffer_size = settings
             .wal_settings
             .write_buffer_size
