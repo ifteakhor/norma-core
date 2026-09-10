@@ -218,7 +218,7 @@ fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
         ("*/*/inference", Active, Raw, false),
         ("*/system/rx", Active, Zstd, true),
         ("*/st3215/meta", Active, Zstd, true),
-        // 50-100 Hz streams.
+        // Streams.
         ("*/st3215/rx", Active, Zstd, true),
         ("*/st3215/tx", Active, Zstd, true),
         ("*/vesc-trampa/rx", Active, Zstd, true),
@@ -228,16 +228,16 @@ fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
         ("*/pwm-output/rx", Active, Zstd, true),
         ("*/pwm-output/tx", Active, Zstd, true),
         ("*/commands", Active, Zstd, true),
+        // 1 Hz sensors.
+        ("*/arduino-nicla-sense-env/rx", Active, Zstd, true),
+        ("*/ina226/*/rx", Active, Zstd, true),
+        ("*/airgradient-open-air-o-1pst/*/rx", Active, Zstd, true),
+        ("*/victron-smartsolar-mppt/*/rx", Active, Zstd, true),
         // Rare records.
         ("*/main", Passive, Zstd, true),
         ("*/startups", Passive, Zstd, true),
         ("*/inference-tags/rx", Passive, Zstd, true),
         ("*/motors_mirroring/modes", Passive, Zstd, true),
-        // 1 Hz sensors.
-        ("*/arduino-nicla-sense-env/rx", Passive, Zstd, true),
-        ("*/ina226/*/rx", Passive, Zstd, true),
-        ("*/airgradient-open-air-o-1pst/*/rx", Passive, Zstd, true),
-        ("*/victron-smartsolar-mppt/*/rx", Passive, Zstd, true),
     ];
 
     QueueSettings::new(
@@ -1083,6 +1083,10 @@ mod tests {
             "/inst123/pwm-output/rx",
             "/inst123/pwm-output/tx",
             "/inst123/commands",
+            "/inst123/arduino-nicla-sense-env/rx",
+            "/inst123/ina226/i2c-1-0x40/rx",
+            "/inst123/airgradient-open-air-o-1pst/usb-1-2/rx",
+            "/inst123/victron-smartsolar-mppt/HQ2222ABCDE/rx",
         ] {
             assert_eq!(pool_for(queue), PoolKind::Active, "{queue}");
         }
@@ -1096,10 +1100,6 @@ mod tests {
             "/inst123/inference-tags/rx",
             "/inst123/motors_mirroring/modes",
             "/inst123/usbvideo/tx",
-            "/inst123/arduino-nicla-sense-env/rx",
-            "/inst123/ina226/i2c-1-0x40/rx",
-            "/inst123/airgradient-open-air-o-1pst/usb-1-2/rx",
-            "/inst123/victron-smartsolar-mppt/HQ2222ABCDE/rx",
         ] {
             assert_eq!(pool_for(queue), PoolKind::Passive, "{queue}");
         }
