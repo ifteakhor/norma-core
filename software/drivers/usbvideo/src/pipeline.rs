@@ -684,7 +684,15 @@ impl<K: USBCameraDriver> USBVideoManager<K> {
         if let Some((queue_id, subscription_id)) = self.command_subscription.lock().take() {
             self.normfs.unsubscribe(&queue_id, subscription_id);
         }
-        self.driver.stop().await;
+        if tokio::time::timeout(CAMERA_STOP_TIMEOUT, self.driver.stop())
+            .await
+            .is_err()
+        {
+            warn!(
+                "Camera driver did not stop within {:?}",
+                CAMERA_STOP_TIMEOUT
+            );
+        }
 
         let mut cameras = std::mem::take(&mut *self.cameras.lock());
         let drained = tokio::time::timeout(CAMERA_STOP_TIMEOUT, async {

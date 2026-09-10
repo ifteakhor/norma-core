@@ -36,6 +36,7 @@ pub const THERMAL_Y16_LEN: usize = SENSOR_WIDTH as usize * SENSOR_HEIGHT as usiz
 pub const RUNTIME_BLOCK_LEN: usize = 2048;
 pub const COMPACT_PAYLOAD_LEN: usize = THERMAL_Y16_LEN + RUNTIME_BLOCK_LEN;
 const DISCOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct HikmicroThermalConfig {
@@ -179,13 +180,22 @@ async fn run_manager<T: StationEngine + Send + Sync + 'static>(
         tokio::time::sleep(DISCOVERY_POLL_INTERVAL).await;
     }
 
-    while let Some(result) = captures.join_next().await {
-        if let Err(e) = result {
-            warn!(
-                "HIKMICRO capture task failed to join during shutdown: {}",
-                e
-            );
+    let drained = tokio::time::timeout(CAPTURE_STOP_TIMEOUT, async {
+        while let Some(result) = captures.join_next().await {
+            if let Err(e) = result {
+                warn!(
+                    "HIKMICRO capture task failed to join during shutdown: {}",
+                    e
+                );
+            }
         }
+    })
+    .await;
+    if drained.is_err() {
+        warn!(
+            "HIKMICRO capture tasks did not finish within {:?}",
+            CAPTURE_STOP_TIMEOUT
+        );
     }
 }
 
