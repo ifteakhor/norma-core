@@ -15,7 +15,7 @@ pub const QUEUE_ID: &str = "dmesg/rx";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_RECORDS_PER_ENVELOPE: usize = 512;
-/// Keeps an envelope under the 256 KiB page limit.
+/// Keeps an envelope well inside one page.
 const MAX_BYTES_PER_ENVELOPE: usize = 192 * 1024;
 const MAX_RECORDS_PER_SECOND: u32 = 200;
 const RESUME_SCAN_ENTRIES: u64 = 32;
@@ -110,7 +110,6 @@ impl Publisher {
             return;
         }
 
-        // The timeout must be created inside the runtime, so it lives in the future.
         if let Err(err) = self.runtime.block_on(enqueue_waiting(
             &self.normfs,
             &self.queue_id,
@@ -391,8 +390,7 @@ mod tests {
     use super::*;
     use normfs::{NormFsSettings, PersistenceMode};
 
-    /// The worker is a plain thread, so `publish` must not create timers
-    /// outside `block_on`.
+    /// `publish` runs on a plain thread.
     #[tokio::test(flavor = "multi_thread")]
     async fn publish_works_from_a_plain_thread() {
         let dir = std::env::temp_dir().join(format!("dmesg-publish-{}", std::process::id()));

@@ -52,7 +52,6 @@ impl Inference {
         Ok(())
     }
 
-    /// Publishes the startup record that identifies this run.
     async fn notify_startup(normfs: &Arc<NormFS>) -> Result<(), normfs::Error> {
         let inference_queue_id = normfs.resolve(QUEUE_ID);
         let inference_queue_ptr = match normfs.get_last_id(&inference_queue_id) {

@@ -351,7 +351,7 @@ mod tests {
         }
     }
 
-    /// Needs a camera; run with `--ignored`.
+    /// Needs a camera.
     #[ignore]
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_only_ends_the_capture_running_at_the_time() {

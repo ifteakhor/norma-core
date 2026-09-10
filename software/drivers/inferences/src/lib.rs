@@ -60,9 +60,8 @@ impl ShmWriter {
             shm_path.display(),
             shm_size_mb
         );
-        // Not `create(true)` on an existing file: with fs.protected_regular
-        // (Linux, on by default) an O_CREAT open of another user's file in a
-        // sticky directory such as /dev/shm is refused, even for root.
+        // No O_CREAT on an existing file: fs.protected_regular refuses that
+        // for another user's file in /dev/shm, even for root.
         let file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)

@@ -219,8 +219,7 @@ async fn run_device_worker(
                         .await;
                     }
                     connected = false;
-                    // The queue is closed while the device is away, so later
-                    // errors are logged rather than recorded.
+                    // Logged only; the queue is closed while the device is away.
                     if let Err(e) = normfs.close_queue(&queue_id).await {
                         error!("Failed to close INA226 queue {}: {}", queue_id, e);
                     }

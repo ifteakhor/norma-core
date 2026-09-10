@@ -57,6 +57,9 @@ impl From<NormFsPersistenceMode> for PersistenceMode {
     }
 }
 
+/// Page size of the active pool, and with it the largest record.
+const ACTIVE_PAGE_SIZE: usize = 4 * 1024 * 1024;
+
 /// NormaCore.Dev station: physical operations platform
 #[derive(Parser, Debug)]
 #[command(name = "NormaCore.Dev station", author, version = VERSION, about, long_about = None)]
@@ -139,12 +142,10 @@ fn validate_normfs_file_size(args: &Args) -> Result<(), io::Error> {
 /// Rejects the CLI value up front (clap fails `Args::parse()` with a clear
 /// message) rather than letting a typo'd `--static-path` silently fall back
 /// to embedded assets on every request.
-/// Retry budget for binding a port still held by a previous instance.
 const BIND_ATTEMPTS: u32 = 30;
 const BIND_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Binds with a short retry on `AddrInUse`. On macOS a port that was just closed, by this process
-/// or a previous instance, can be refused briefly.
+/// Retries `AddrInUse`; macOS refuses a just-closed port briefly.
 async fn bind_retrying<T, F, Fut>(what: &str, addr: SocketAddr, mut bind: F) -> Result<T, String>
 where
     F: FnMut() -> Fut,
@@ -203,8 +204,7 @@ fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
     use PoolKind::{Active, Passive};
 
     // Matched against the absolute id `/<instance_id>/<path>`, first match wins, so every
-    // pattern starts with `*`. The pool sets the page size and with it the largest record:
-    // 256 KiB active, 32 KiB passive.
+    // pattern starts with `*`. Active pages are `ACTIVE_PAGE_SIZE`, passive 32 KiB.
     let rules = [
         // (pattern, pool, compression, fsync)
         // Before `*video/*`, which would match it.
@@ -326,6 +326,7 @@ impl Station {
                 NormFsPersistenceMode::MemoryOnly => None,
             },
             max_memory_usage: args.max_memory_usage,
+            mem_page_size: ACTIVE_PAGE_SIZE,
             persistence_mode: args.normfs_persistence_mode.into(),
             ..Default::default()
         };
@@ -1021,7 +1022,7 @@ async fn start_services(
     })
 }
 
-/// Also runs after a failed startup; dropping the runtime would wait on the capture threads.
+/// Also the exit path of a failed startup.
 async fn shutdown_station(
     station: &Station,
     services: Option<Services>,
