@@ -11,9 +11,7 @@ use bytes::BytesMut;
 use log::{info, warn};
 use normfs::NormFS;
 use prost::Message;
-use station_iface::{
-    StationEngine, WRITE_TIMEOUT, enqueue_waiting, iface_proto::drivers::QueueDataType,
-};
+use station_iface::{StationEngine, WRITE_TIMEOUT, iface_proto::drivers::QueueDataType};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub mod hikmicro_proto {
@@ -297,12 +295,11 @@ fn enqueue_envelope(
     } else {
         // Bounded so shutdown can join this thread.
         sink.runtime
-            .block_on(enqueue_waiting(
-                &sink.normfs,
-                &sink.queue_id,
-                data,
-                WRITE_TIMEOUT,
-            ))
+            .block_on(
+                sink.normfs
+                    .enqueue_timeout(&sink.queue_id, data, WRITE_TIMEOUT),
+            )
+            .map(|_| ())
             .map_err(|e| e.to_string())
     }
 }

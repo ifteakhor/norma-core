@@ -38,23 +38,10 @@ pub async fn enqueue_with(
 ) -> Result<(), normfs::Error> {
     match policy {
         Backpressure::Skip => try_enqueue_with(normfs, queue_id, data, policy),
-        Backpressure::Keep => enqueue_waiting(normfs, queue_id, data, WRITE_TIMEOUT).await,
-    }
-}
-
-/// Enqueues from an async context, waiting up to `wait` for a free page.
-pub async fn enqueue_waiting(
-    normfs: &NormFS,
-    queue_id: &QueueId,
-    data: Bytes,
-    wait: Duration,
-) -> Result<(), normfs::Error> {
-    match tokio::time::timeout(wait, normfs.enqueue(queue_id, data)).await {
-        Ok(outcome) => outcome.map(|_| ()),
-        Err(_) => Err(normfs::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "no page became free in time",
-        ))),
+        Backpressure::Keep => normfs
+            .enqueue_timeout(queue_id, data, WRITE_TIMEOUT)
+            .await
+            .map(|_| ()),
     }
 }
 

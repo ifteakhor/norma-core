@@ -189,9 +189,9 @@ impl ST3215BusCommunicator {
                 Err(e) => return Err(Box::new(e)),
             },
             Backpressure::Keep => {
-                tokio::time::timeout(WRITE_TIMEOUT, self.normfs.enqueue(&self.rx_queue_id, data))
-                    .await
-                    .map_err(|_| "no page became free in time")??
+                self.normfs
+                    .enqueue_timeout(&self.rx_queue_id, data, WRITE_TIMEOUT)
+                    .await?
             }
         };
         self.update_state(envelope, id, policy).await;

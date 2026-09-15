@@ -6,7 +6,7 @@ use station_iface::iface_proto::{
     drivers::QueueDataType,
     envelope::{QueueData, QueueOpt, RootQueueEnvelope, RootQueueEnvelopeType},
 };
-use station_iface::{Backpressure, STARTUP_WRITE_TIMEOUT, enqueue_waiting, try_enqueue_with};
+use station_iface::{Backpressure, STARTUP_WRITE_TIMEOUT, try_enqueue_with};
 use std::sync::Arc;
 
 pub const MAIN_QUEUE_ID: &str = "main";
@@ -33,13 +33,9 @@ impl MainQueue {
         let envelope = self.create_envelope(RootQueueEnvelopeType::RqetAppStart, None);
         let mut buf = Vec::new();
         envelope.encode(&mut buf)?;
-        enqueue_waiting(
-            &self.normfs,
-            &self.queue_id,
-            Bytes::from(buf),
-            STARTUP_WRITE_TIMEOUT,
-        )
-        .await?;
+        self.normfs
+            .enqueue_timeout(&self.queue_id, Bytes::from(buf), STARTUP_WRITE_TIMEOUT)
+            .await?;
         Ok(())
     }
 

@@ -5,7 +5,7 @@ use log::{error, info};
 use normfs::{NormFS, QueueId};
 use prost::Message;
 use station_iface::iface_proto::drivers::QueueDataType;
-use station_iface::{StationEngine, WRITE_TIMEOUT, enqueue_waiting};
+use station_iface::{StationEngine, WRITE_TIMEOUT};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -110,8 +110,7 @@ impl Publisher {
             return;
         }
 
-        if let Err(err) = self.runtime.block_on(enqueue_waiting(
-            &self.normfs,
+        if let Err(err) = self.runtime.block_on(self.normfs.enqueue_timeout(
             &self.queue_id,
             Bytes::from(buffer),
             WRITE_TIMEOUT,

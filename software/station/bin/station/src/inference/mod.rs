@@ -6,7 +6,7 @@ use normfs::NormFS;
 use normfs::UintN;
 use parking_lot::{Condvar, Mutex};
 use prost::Message;
-use station_iface::{STARTUP_WRITE_TIMEOUT, enqueue_waiting};
+use station_iface::STARTUP_WRITE_TIMEOUT;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -73,13 +73,14 @@ impl Inference {
         normfs
             .ensure_queue_exists_for_write(&startups_queue_id)
             .await?;
-        enqueue_waiting(
-            normfs,
-            &startups_queue_id,
-            Bytes::from(startup.encode_to_vec()),
-            STARTUP_WRITE_TIMEOUT,
-        )
-        .await
+        normfs
+            .enqueue_timeout(
+                &startups_queue_id,
+                Bytes::from(startup.encode_to_vec()),
+                STARTUP_WRITE_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
     }
 
     pub async fn start(normfs: Arc<NormFS>) -> Result<Self, normfs::Error> {

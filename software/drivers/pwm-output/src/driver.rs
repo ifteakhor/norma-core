@@ -8,9 +8,7 @@ use normfs::NormFS;
 use parking_lot::Mutex;
 use prost::Message;
 use station_iface::iface_proto::{commands, drivers};
-use station_iface::{
-    Backpressure, STARTUP_WRITE_TIMEOUT, StationEngine, enqueue_waiting, try_enqueue_with,
-};
+use station_iface::{Backpressure, STARTUP_WRITE_TIMEOUT, StationEngine, try_enqueue_with};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -91,8 +89,9 @@ impl PwmOutputDriver {
                 Some(runtime.state.clone()),
                 None,
                 None,
-            ) && let Err(error) =
-                enqueue_waiting(&normfs, &rx_queue_id, data, STARTUP_WRITE_TIMEOUT).await
+            ) && let Err(error) = normfs
+                .enqueue_timeout(&rx_queue_id, data, STARTUP_WRITE_TIMEOUT)
+                .await
             {
                 error!(
                     "Failed to record PWM output '{}' as configured: {}",
