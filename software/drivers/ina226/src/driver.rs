@@ -126,10 +126,10 @@ impl Ina226Driver {
             let rx_queue_path = device_rx_queue_path(device.key);
             let rx_queue_id = normfs.resolve(&rx_queue_path);
             normfs.ensure_queue_exists_for_write(&rx_queue_id).await?;
-            station_engine.register_queue(&rx_queue_id, QueueDataType::QdtIna226Rx, vec![]);
 
             tasks.push(tokio::spawn(run_device_worker(
                 normfs.clone(),
+                station_engine.clone(),
                 rx_queue_id,
                 device.clone(),
                 DEFAULT_POLL_INTERVAL,
@@ -155,8 +155,9 @@ pub async fn start_ina226_driver<T: StationEngine>(
     Ok(Arc::new(driver))
 }
 
-async fn run_device_worker(
+async fn run_device_worker<T: StationEngine>(
     normfs: Arc<NormFS>,
+    station_engine: Arc<T>,
     queue_id: normfs::QueueId,
     device: Device,
     poll_interval: Duration,
@@ -178,6 +179,8 @@ async fn run_device_worker(
                         error!("Failed to reopen INA226 queue {}: {}", queue_id, e);
                         continue;
                     }
+                    // A close drops the queue's subscriptions with it.
+                    station_engine.register_queue(&queue_id, QueueDataType::QdtIna226Rx, vec![]);
                     send_device_signal(
                         &normfs,
                         &queue_id,
