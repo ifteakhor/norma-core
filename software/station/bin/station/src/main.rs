@@ -256,7 +256,7 @@ fn queue_settings() -> Result<QueueSettings, Box<dyn std::error::Error>> {
                 (pattern.to_string(), config)
             })
             .collect(),
-        QueueConfig::default(), // passive, for queues not listed above
+        QueueConfig::active(), // 4 MiB pages for queues not listed above
     )
     .map_err(Into::into)
 }
@@ -1107,6 +1107,15 @@ mod tests {
             "/inst123/usbvideo/tx",
         ] {
             assert_eq!(pool_for(queue), PoolKind::Passive, "{queue}");
+        }
+    }
+
+    /// A configured inference queue id, or a driver added later, must not be
+    /// capped at 32 KiB records for not being listed.
+    #[test]
+    fn a_queue_the_list_does_not_know_gets_active_pages() {
+        for queue in ["/inst123/datasets/normvla", "/inst123/new-driver/rx"] {
+            assert_eq!(pool_for(queue), PoolKind::Active, "{queue}");
         }
     }
 
