@@ -40,6 +40,28 @@ struct TimedBoardCommandStep {
     duration: Duration,
 }
 
+/// Never waits: a full backlog drops a `Skip` record as superseded and a
+/// `Keep` record with a warning.
+fn offer_rx_record(
+    publisher: &mpsc::Sender<RxRecord>,
+    port_name: &str,
+    envelope: RxEnvelope,
+    policy: Backpressure,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match publisher.try_send((envelope, policy)) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full((envelope, Backpressure::Keep))) => {
+            warn!(
+                "VESC Trampa {} rx backlog is full; dropping signal {}",
+                port_name, envelope.signal_type
+            );
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err("the rx publisher is gone".into()),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CommandProcessResult {
     accepted: bool,
@@ -74,6 +96,14 @@ impl std::error::Error for VescTrampaProbeError {
     }
 }
 
+/// An rx record on its way to the publisher task.
+type RxRecord = (RxEnvelope, Backpressure);
+
+/// Ten seconds of values at the tick rate: twice the write timeout, so a
+/// `Keep` record is dropped only once storage has been stuck longer than a
+/// direct wait would have tolerated.
+const RX_BACKLOG: usize = 1024;
+
 pub struct VescTrampaPort {
     port_info: SerialPortInfo,
     board_info: VescTrampaBoard,
@@ -82,6 +112,10 @@ pub struct VescTrampaPort {
     motor_config: Option<MotorConfigPayload>,
     app_config: Option<AppConfigPayload>,
     values: Option<ValuesPayload>,
+    /// Set while the port loop runs. The loop drives a 10 ms motor tick, so
+    /// it must not wait for storage: its rx records go through one channel
+    /// to a task that does the waiting, in order.
+    rx_publisher: Option<mpsc::Sender<RxRecord>>,
 }
 
 impl VescTrampaPort {
@@ -98,6 +132,7 @@ impl VescTrampaPort {
             motor_config: None,
             app_config: None,
             values: None,
+            rx_publisher: None,
         }
     }
 
@@ -165,6 +200,23 @@ impl VescTrampaPort {
             return Err(error);
         }
 
+        let (rx_tx, mut rx_rx) = mpsc::channel::<RxRecord>(RX_BACKLOG);
+        self.rx_publisher = Some(rx_tx);
+        let publisher = tokio::spawn({
+            let com = self.com.clone();
+            let port_name = port_name.clone();
+            async move {
+                while let Some((envelope, policy)) = rx_rx.recv().await {
+                    if let Err(error) = com.send_rx(&envelope, policy).await {
+                        warn!(
+                            "VESC Trampa {} failed to publish a record: {}",
+                            port_name, error
+                        );
+                    }
+                }
+            }
+        });
+
         let mut tick_interval =
             tokio::time::interval(Duration::from_millis(VESC_TRAMPA_TICK_INTERVAL_MS));
         tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -177,7 +229,7 @@ impl VescTrampaPort {
                     command_waiting.store(false, Ordering::SeqCst);
                     self.log_command_received(&command);
 
-                    if let Err(error) = self.send_command_received_signal(&command).await {
+                    if let Err(error) = self.send_command_received_signal(&command) {
                         error!("Failed to send VESC Trampa command received signal: {}", error);
                         break;
                     }
@@ -190,12 +242,12 @@ impl VescTrampaPort {
                                 VescTrampaSignalType::VescTrampaCommandRejected
                             };
 
-                            if let Err(error) = self.send_command_result_signal(&command, signal_type, None).await {
+                            if let Err(error) = self.send_command_result_signal(&command, signal_type, None) {
                                 error!("Failed to send VESC Trampa command result signal: {}", error);
                                 break;
                             }
                             if result.done {
-                                if let Err(error) = self.send_command_done_signal(&command).await {
+                                if let Err(error) = self.send_command_done_signal(&command) {
                                     error!("Failed to send VESC Trampa command done signal: {}", error);
                                     break;
                                 }
@@ -203,14 +255,11 @@ impl VescTrampaPort {
                         }
                         Err(error) => {
                             let error_message = error.to_string();
-                            if let Err(send_error) = self
-                                .send_command_result_signal(
-                                    &command,
-                                    VescTrampaSignalType::VescTrampaCommandFailed,
-                                    Some(error_message),
-                                )
-                                .await
-                            {
+                            if let Err(send_error) = self.send_command_result_signal(
+                                &command,
+                                VescTrampaSignalType::VescTrampaCommandFailed,
+                                Some(error_message),
+                            ) {
                                 error!("Failed to send VESC Trampa command failure signal: {}", send_error);
                             }
                             warn!("VESC Trampa command failed on {}: {}", port_name, error);
@@ -235,7 +284,7 @@ impl VescTrampaPort {
                         .map(|command| command.source_command.clone());
                     match self.tick_active_board_command(&mut port, &mut active_board_command).await {
                         Ok(Some(done_command)) => {
-                            if let Err(error) = self.send_command_done_signal(&done_command).await {
+                            if let Err(error) = self.send_command_done_signal(&done_command) {
                                 error!("Failed to send VESC Trampa command done signal: {}", error);
                                 break;
                             }
@@ -244,14 +293,11 @@ impl VescTrampaPort {
                         Err(error) => {
                             if let Some(command) = active_source_command {
                                 let error_message = error.to_string();
-                                if let Err(send_error) = self
-                                    .send_command_result_signal(
-                                        &command,
-                                        VescTrampaSignalType::VescTrampaCommandFailed,
-                                        Some(error_message),
-                                    )
-                                    .await
-                                {
+                                if let Err(send_error) = self.send_command_result_signal(
+                                    &command,
+                                    VescTrampaSignalType::VescTrampaCommandFailed,
+                                    Some(error_message),
+                                ) {
                                     error!("Failed to send VESC Trampa timed command failure signal: {}", send_error);
                                 }
                             }
@@ -270,6 +316,12 @@ impl VescTrampaPort {
 
         normfs.unsubscribe(&tx_queue_id, subscription_id);
         drop(cmd_tx);
+
+        // Everything the loop published lands before the disconnect record.
+        self.rx_publisher = None;
+        if let Err(error) = publisher.await {
+            warn!("VESC Trampa {} publisher task failed: {}", port_name, error);
+        }
 
         if let Err(error) = self
             .send_board_signal(VescTrampaSignalType::VescTrampaBoardDisconnect)
@@ -303,8 +355,7 @@ impl VescTrampaPort {
                 );
 
                 self.values = Some(values);
-                self.send_board_packet_signal(&source_packet, Backpressure::Skip)
-                    .await?;
+                self.send_board_packet_signal(&source_packet, Backpressure::Skip)?;
             }
             _ => unreachable!(),
         }
@@ -412,8 +463,7 @@ impl VescTrampaPort {
                 )
                 .into());
             }
-            self.send_board_packet_signal(&response_packet, Backpressure::Keep)
-                .await?;
+            self.send_board_packet_signal(&response_packet, Backpressure::Keep)?;
             return Ok(CommandProcessResult {
                 accepted: true,
                 done: true,
@@ -740,7 +790,7 @@ impl VescTrampaPort {
         self.com.send_rx(&envelope, Backpressure::Keep).await
     }
 
-    async fn send_board_packet_signal(
+    fn send_board_packet_signal(
         &self,
         packet: &CommPacket,
         policy: Backpressure,
@@ -755,35 +805,33 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope, policy).await
+        self.publish(envelope, policy)
     }
 
-    async fn send_command_received_signal(
+    fn send_command_received_signal(
         &self,
         command: &TxEnvelope,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send_command_signal(command, VescTrampaSignalType::VescTrampaCommand, None)
-            .await
     }
 
-    async fn send_command_result_signal(
+    fn send_command_result_signal(
         &self,
         command: &TxEnvelope,
         signal_type: VescTrampaSignalType,
         error: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.send_command_signal(command, signal_type, error).await
+        self.send_command_signal(command, signal_type, error)
     }
 
-    async fn send_command_done_signal(
+    fn send_command_done_signal(
         &self,
         command: &TxEnvelope,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send_command_signal(command, VescTrampaSignalType::VescTrampaCommandDone, None)
-            .await
     }
 
-    async fn send_command_signal(
+    fn send_command_signal(
         &self,
         command: &TxEnvelope,
         signal_type: VescTrampaSignalType,
@@ -800,7 +848,19 @@ impl VescTrampaPort {
             ..Default::default()
         };
 
-        self.com.send_rx(&envelope, Backpressure::Keep).await
+        self.publish(envelope, Backpressure::Keep)
+    }
+
+    fn publish(
+        &self,
+        envelope: RxEnvelope,
+        policy: Backpressure,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let publisher = self
+            .rx_publisher
+            .as_ref()
+            .ok_or("the rx publisher is not running")?;
+        offer_rx_record(publisher, &self.board_info.port_name, envelope, policy)
     }
 
     fn to_board_packet_proto(packet: &CommPacket) -> VescTrampaBoardPacket {
@@ -826,9 +886,11 @@ fn format_bytes(value: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::VescTrampaPort;
-    use crate::vesc_trampa_proto::{TxEnvelope, VescTrampaBoardCommand};
+    use super::{RxRecord, VescTrampaPort, offer_rx_record};
+    use crate::vesc_trampa_proto::{RxEnvelope, TxEnvelope, VescTrampaBoardCommand};
     use bytes::Bytes;
+    use station_iface::Backpressure;
+    use tokio::sync::mpsc;
 
     #[test]
     fn parses_set_current_payload_current_ma() {
@@ -852,6 +914,21 @@ mod tests {
         let payload = [8, 0xff, 0xff, 0xfc, 0x18];
 
         assert_eq!(VescTrampaPort::set_rpm_payload_rpm(&payload), Some(-1000));
+    }
+
+    #[test]
+    fn a_full_backlog_drops_the_record_and_a_gone_publisher_is_an_error() {
+        let (tx, rx) = mpsc::channel::<RxRecord>(1);
+        let offer = |policy| offer_rx_record(&tx, "port", RxEnvelope::default(), policy);
+
+        assert!(offer(Backpressure::Keep).is_ok(), "takes the one slot");
+        assert!(offer(Backpressure::Skip).is_ok(), "superseded");
+        assert!(
+            offer(Backpressure::Keep).is_ok(),
+            "dropped, not a loop exit"
+        );
+        drop(rx);
+        assert!(offer(Backpressure::Keep).is_err());
     }
 
     #[test]
