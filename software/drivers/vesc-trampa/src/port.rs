@@ -10,7 +10,7 @@ use crate::vesc_trampa_proto::{
 use bytes::Bytes;
 use log::{debug, error, info, warn};
 use prost::Message;
-use station_iface::Backpressure;
+use station_iface::{Backpressure, WRITE_TIMEOUT};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
@@ -202,7 +202,7 @@ impl VescTrampaPort {
 
         let (rx_tx, mut rx_rx) = mpsc::channel::<RxRecord>(RX_BACKLOG);
         self.rx_publisher = Some(rx_tx);
-        let publisher = tokio::spawn({
+        let mut publisher = tokio::spawn({
             let com = self.com.clone();
             let port_name = port_name.clone();
             async move {
@@ -319,8 +319,18 @@ impl VescTrampaPort {
 
         // Everything the loop published lands before the disconnect record.
         self.rx_publisher = None;
-        if let Err(error) = publisher.await {
-            warn!("VESC Trampa {} publisher task failed: {}", port_name, error);
+        match tokio::time::timeout(WRITE_TIMEOUT, &mut publisher).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!("VESC Trampa {} publisher task failed: {}", port_name, error);
+            }
+            Err(_) => {
+                publisher.abort();
+                warn!(
+                    "VESC Trampa {} rx backlog did not drain in {:?}; dropping the rest",
+                    port_name, WRITE_TIMEOUT
+                );
+            }
         }
 
         if let Err(error) = self
