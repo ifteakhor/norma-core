@@ -23,7 +23,7 @@
     "start": "npm run build:viewer && npm run build:station && npm run build && electron . --load-dist",
     "package:mac": "npm run clean:release && npm run build:viewer && npm run build:station:mac && npm run build && electron-builder --mac --arm64 --x64 --config electron-builder.yml",
     "package:mac:presigned": "npm run clean:release && npm run build:viewer && npm run build:station:mac && npm run build && electron-builder --mac --arm64 --x64 --config electron-builder.yml",
-    "package:mac:unsigned": "npm run clean:release && npm run build:viewer && npm run build:station:mac && npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --x64 --config electron-builder.yml",
+    "package:mac:unsigned": "npm run clean:release && npm run build:viewer && npm run build:station:mac && npm run build && electron-builder --mac --arm64 --x64 --config electron-builder.yml -c.mac.identity=- -c.mac.notarize=false -c.mac.hardenedRuntime=false",
     "lint": "oxlint src/",
     "type-check": "node scripts/generate-version.mjs && tsc --noEmit"
   },
