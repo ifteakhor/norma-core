@@ -8,6 +8,7 @@ files:
   - dist/**/*
 mac:
   category: public.app-category.developer-tools
+  minimumSystemVersion: "13.0"
   icon: build/icon.icns
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
