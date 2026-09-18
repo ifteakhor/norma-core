@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["arduino", "ina226"]
-arduino = ["dep:arduino-nicla-sense-env"]
+arduino = ["dep:arduino-nicla-sense-env", "dep:arduino-nicla-sense-me"]
 ina226 = ["dep:ina226"]
 ov5647 = ["dep:ov5647"]
 yahboom-dogzilla-lite = ["dep:yahboom-dogzilla-lite"]
@@ -20,6 +20,7 @@ station_iface = { path = "../../shared/station-iface" }
 st3215 = { path = "../../../drivers/st3215" }
 vesc-trampa = { path = "../../../drivers/vesc-trampa" }
 airgradient-open-air-o-1pst = { path = "../../../drivers/airgradient-open-air-o-1pst" }
+arduino-nicla-sense-me = { path = "../../../drivers/arduino-nicla-sense-me", optional = true }
 victron-smartsolar-mppt = { path = "../../../drivers/victron-smartsolar-mppt" }
 pwm-output = { path = "../../../drivers/pwm-output" }
 dmesg = { path = "../../../drivers/dmesg" }

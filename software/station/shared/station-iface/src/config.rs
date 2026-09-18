@@ -97,6 +97,13 @@ pub struct Drivers {
     )]
     pub arduino_nicla_sense_env: Option<ArduinoNiclaSenseEnvConfig>,
 
+    #[serde(
+        rename = "arduino-nicla-sense-me",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub arduino_nicla_sense_me: Option<ArduinoNiclaSenseMeConfig>,
+
     #[serde(rename = "ina226", skip_serializing_if = "Option::is_none")]
     pub ina226: Option<Ina226Config>,
 
@@ -450,6 +457,15 @@ impl Default for ArduinoNiclaSenseEnvConfig {
     }
 }
 
+/// Boards are not configured: the driver autodetects every Nicla Sense ME
+/// on USB (vid 2341 pid 0060) and streams each into its own queue named by
+/// the board's serial number.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct ArduinoNiclaSenseMeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Ina226Config {
     #[serde(default)]
@@ -586,6 +602,7 @@ impl Default for Drivers {
             yahboom_dogzilla_lite: None,
             ov5647: None,
             arduino_nicla_sense_env: None,
+            arduino_nicla_sense_me: None,
             ina226: None,
             airgradient_open_air_o_1pst: None,
             victron_smartsolar_mppt: None,
@@ -765,5 +782,40 @@ mod hikmicro_thermal_config_tests {
         let cfg: HikmicroThermalConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.frame_timeout, std::time::Duration::from_secs(2));
         assert_eq!(cfg.frame_skip, 3);
+    }
+}
+
+#[cfg(test)]
+mod arduino_nicla_sense_me_tests {
+    use super::*;
+
+    #[test]
+    fn parses_arduino_nicla_sense_me_drivers_block() {
+        // Deserialize the Drivers struct directly so the test doesn't depend on
+        // unrelated required fields of the top-level Config.
+        let yaml = r#"
+system-info: false
+arduino-nicla-sense-me:
+  enabled: true
+"#;
+        let drivers: Drivers = serde_yaml::from_str(yaml).expect("drivers block parses");
+        let me = drivers
+            .arduino_nicla_sense_me
+            .expect("nicla sense me block present");
+        assert!(me.enabled);
+        assert_eq!(me, ArduinoNiclaSenseMeConfig { enabled: true });
+    }
+
+    #[test]
+    fn arduino_nicla_sense_me_defaults_to_disabled() {
+        let yaml = r#"
+system-info: false
+arduino-nicla-sense-me: {}
+"#;
+        let drivers: Drivers = serde_yaml::from_str(yaml).expect("drivers block parses");
+        assert_eq!(
+            drivers.arduino_nicla_sense_me,
+            Some(ArduinoNiclaSenseMeConfig { enabled: false })
+        );
     }
 }

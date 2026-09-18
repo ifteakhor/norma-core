@@ -1,4 +1,5 @@
 import type { hikmicro } from '@/api/proto.js';
+import { buildThermalSpectrum, type ThermalSpectrum } from './hud/spectrum';
 
 const SENSOR_WIDTH = 256;
 const SENSOR_HEIGHT = 192;
@@ -13,12 +14,13 @@ const KELVIN_OFFSET_Q12 = 0x111266;
 // runtime calibration states. Decoding is synchronous (and runs in a Worker).
 const TEMPERATURE_CACHE = new Float32Array(0x10000);
 
-export type ThermalPalette = 'arctic' | 'iron' | 'silver';
+export type ThermalPalette = 'arctic' | 'iron' | 'silver' | 'terminator';
 
 export interface ThermalRenderResult {
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
+  spectrum?: ThermalSpectrum;
   minC: number | null;
   maxC: number | null;
   centerC: number | null;
@@ -621,6 +623,7 @@ function toRgba(values: Float32Array, lo: number, hi: number, paletteName: Therm
   const span = hi > lo ? hi - lo : 1;
   for (let i = 0; i < values.length; i += 1) {
     const value = values[i];
+    // Rotate while writing the output: no extra frame allocation or pixel pass.
     const j = i * 4;
     if (!Number.isFinite(value)) {
       rgba[j] = rgba[j + 1] = rgba[j + 2] = 241;
@@ -631,7 +634,11 @@ function toRgba(values: Float32Array, lo: number, hi: number, paletteName: Therm
       rgba[j + 2] = b;
     } else {
       const t = Math.max(0, Math.min(1, (value - lo) / span));
-      if (paletteName === 'silver') {
+      if (paletteName === 'terminator') {
+        rgba[j] = Math.min(255, Math.round(t * 420));
+        rgba[j + 1] = Math.round(Math.max(0, (t - 0.65) / 0.35) ** 1.5 * 244);
+        rgba[j + 2] = Math.round(Math.max(0, (t - 0.72) / 0.28) ** 1.5 * 225);
+      } else if (paletteName === 'silver') {
         const gray = Math.round(65 + t * 190);
         rgba[j] = rgba[j + 1] = rgba[j + 2] = gray;
       } else {
@@ -684,6 +691,7 @@ export function renderThermalFrame(
     width: SENSOR_WIDTH,
     height: SENSOR_HEIGHT,
     rgba: toRgba(map, lo, hi, paletteName),
+    spectrum: paletteName === 'terminator' ? buildThermalSpectrum(map, usedCalibration) : undefined,
     minC: usedCalibration ? stats.min : null,
     maxC: usedCalibration ? stats.max : null,
     centerC: usedCalibration ? stats.center : null,

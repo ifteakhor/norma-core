@@ -37,6 +37,7 @@ class QueueDataType(enum.IntEnum):
     QDT_PWM_OUTPUT_TX = 55
     QDT_PWM_OUTPUT_RX = 56
     QDT_DMESG_RX = 57
+    QDT_ARDUINO_NICLA_SENSE_ME_RX = 59
 
 class StationCommandType(enum.IntEnum):
     STC_ST3215_COMMAND = 0

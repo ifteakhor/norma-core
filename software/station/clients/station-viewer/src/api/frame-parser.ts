@@ -1,6 +1,6 @@
 import Long from 'long';
-import { airgradient_open_air_o_1pst, arduino_nicla_sense_env, dmesg, hikmicro, ina226, yahboom_dogzilla_lite, drivers, inference, motors_mirroring, normvla, pwm_output, st3215, sysinfo, usbvideo, vesc_trampa, victron_smartsolar_mppt } from '@/api/proto.js';
-import { NormFsClient } from "./normfs.js";
+import { airgradient_open_air_o_1pst, arduino_nicla_sense_env, dmesg, hikmicro, ina226, yahboom_dogzilla_lite, drivers, inference, motors_mirroring, normvla, pwm_output, st3215, sysinfo, usbvideo, vesc_trampa, victron_smartsolar_mppt, arduino_nicla_sense_me } from '@/api/proto.js';
+import { ErrEntryNotFound, NormFsClient, type StreamEntry } from "./normfs.js";
 import { getGlobalTimeAdjustmentNs, isTimeSyncActive } from '@/api/time-sync.js';
 import {
   createLiveCameraMetadataEnvelope,
@@ -16,6 +16,8 @@ export interface FrameEntry<T> {
 }
 
 export interface Frame {
+  // Queue descriptors are already carried in the inference index; no payload reads.
+  availableQueues?: inference.InferenceRx.IEntry[];
   stateId?: Uint8Array;
   st3215?: FrameEntry<st3215.IInferenceState>;
   st3215Tx?: FrameEntry<st3215.ITxEnvelope>;
@@ -30,6 +32,7 @@ export interface Frame {
   mirroring?: FrameEntry<motors_mirroring.IRxEnvelope>;
   sysinfo?: FrameEntry<sysinfo.IEnvelope>;
   arduinoNiclaSenseEnv?: FrameEntry<arduino_nicla_sense_env.IRxEnvelope>;
+  arduinoNiclaSenseMe?: FrameEntry<arduino_nicla_sense_me.IRxEnvelope>[];
   ina226?: FrameEntry<ina226.IRxEnvelope>[];
   airgradientOpenAir?: FrameEntry<airgradient_open_air_o_1pst.IRxEnvelope>[];
   victronSmartSolar?: FrameEntry<victron_smartsolar_mppt.IRxEnvelope>[];
@@ -53,10 +56,13 @@ export interface Frame {
 }
 
 // Find entry in previous frame with matching queue and pointer
-type DecodedEntry = st3215.IInferenceState | st3215.ITxEnvelope | usbvideo.IRxEnvelope | usbvideo.ITxEnvelope | hikmicro.IRxEnvelope | motors_mirroring.IRxEnvelope | sysinfo.IEnvelope | arduino_nicla_sense_env.IRxEnvelope | ina226.IRxEnvelope | airgradient_open_air_o_1pst.IRxEnvelope | victron_smartsolar_mppt.IRxEnvelope | dmesg.IRxEnvelope | yahboom_dogzilla_lite.IInferenceState | normvla.IFrame | vesc_trampa.IInferenceState | vesc_trampa.IRxEnvelope | vesc_trampa.ITxEnvelope | pwm_output.IRxEnvelope | pwm_output.ITxEnvelope | null;
+type DecodedEntry = st3215.IInferenceState | st3215.ITxEnvelope | usbvideo.IRxEnvelope | usbvideo.ITxEnvelope | hikmicro.IRxEnvelope | motors_mirroring.IRxEnvelope | sysinfo.IEnvelope | arduino_nicla_sense_env.IRxEnvelope | ina226.IRxEnvelope | airgradient_open_air_o_1pst.IRxEnvelope | victron_smartsolar_mppt.IRxEnvelope | dmesg.IRxEnvelope | yahboom_dogzilla_lite.IInferenceState | normvla.IFrame | vesc_trampa.IInferenceState | vesc_trampa.IRxEnvelope | vesc_trampa.ITxEnvelope | pwm_output.IRxEnvelope | pwm_output.ITxEnvelope | arduino_nicla_sense_me.IRxEnvelope | null;
 
 interface ParseFrameOptions {
+  queueAllowlist?: ReadonlySet<string> | null;
+  shouldReadQueue?: (queue: string) => boolean;
   retainRawData?: boolean;
+  thermalDiscoveryOnly?: boolean;
   shouldPublishVideoFrames?: () => boolean;
   shouldLoadVideoFrame?: (
     queueId: string,
@@ -173,6 +179,17 @@ function findPreviousEntry(
     }
   }
 
+  // Check Arduino Nicla Sense ME
+  if (previousFrame.arduinoNiclaSenseMe) {
+    const match = previousFrame.arduinoNiclaSenseMe.find(entry => entry.queueId === queue);
+    if (match) {
+      const prevPtr = match.ptr;
+      if (prevPtr.length === ptr.length && prevPtr.every((b, i) => b === ptr[i])) {
+        return { decoded: match.data, rawData: match.rawData ?? null };
+      }
+    }
+  }
+
   // Check INA226
   if (previousFrame.ina226) {
     const match = previousFrame.ina226.find(entry => entry.queueId === queue);
@@ -260,8 +277,10 @@ export async function parseFrame(
   const retainRawData = options.retainRawData ?? true;
   const frame: Frame = {
     stateId: new Uint8Array(Array.from(entryIdBytes)),
+    availableQueues: inferenceRx.entries ?? [],
     videoQueues: [],
     hikmicroThermal: [],
+    arduinoNiclaSenseMe: [],
     ina226: [],
     airgradientOpenAir: [],
     victronSmartSolar: [],
@@ -295,6 +314,28 @@ export async function parseFrame(
       if (!entry.queue || !entry.ptr) {
         console.warn("Entry missing queue or ptr:", entry);
         return Promise.resolve(null);
+      }
+
+      if (options.queueAllowlist && !options.queueAllowlist.has(entry.queue)) {
+        return Promise.resolve(null);
+      }
+      // Throttle before I/O and preserve the old pointer with cached data, so a
+      // skipped sample cannot be mistaken for an already downloaded new sample.
+      if (options.shouldReadQueue && !options.shouldReadQueue(entry.queue)) {
+        const cached = [previousFrame?.vescTrampa,
+          ...(previousFrame?.victronSmartSolar ?? []),
+          ...(previousFrame?.arduinoNiclaSenseMe ?? [])].find(e => e?.queueId === entry.queue);
+        if (cached) return Promise.resolve({ queue: entry.queue, type: entry.type,
+          ptr: cached.ptr, decoded: cached.data, rawData: null, id: null,
+          reused: true, isNormvla: false });
+        return Promise.resolve(null);
+      }
+
+      // Live thermal viewers own their reads; a slow camera must not stall
+      // unrelated sensors. History still follows the exact recorded pointer.
+      if (options.thermalDiscoveryOnly && entry.type === drivers.QueueDataType.QDT_HIKMICRO_THERMAL) {
+        return Promise.resolve({ queue: entry.queue, type: entry.type, ptr: entry.ptr,
+          decoded: {}, rawData: null, id: null, reused: true, isNormvla: false });
       }
 
       // Check if we can reuse from previous frame
@@ -338,7 +379,18 @@ export async function parseFrame(
       // Pointer changed, fetch from StreamFS
       return (async () => {
         try {
-          const streamEntry = await normFs.readSingleEntry(entry.queue!, entry.ptr!);
+          let streamEntry: StreamEntry;
+          let resolvedPtr = entry.ptr;
+          try {
+            streamEntry = await normFs.readSingleEntry(entry.queue!, entry.ptr!);
+          } catch (error) {
+            // A live snapshot can outlast a thermal entry's retention window.
+            // Recover once from the tail, keeping history reads exact and
+            // allowing connection/server errors to follow normal handling.
+            if (error !== ErrEntryNotFound || entry.type !== drivers.QueueDataType.QDT_HIKMICRO_THERMAL || !options.shouldPublishVideoFrames?.()) throw error;
+            streamEntry = await normFs.readLastEntry(entry.queue!);
+            resolvedPtr = streamEntry.id;
+          }
 
           // Decode based on queue data type
           let decoded = null;
@@ -391,6 +443,13 @@ export async function parseFrame(
                 decoded = arduino_nicla_sense_env.RxEnvelope.decode(streamEntry.data);
               } catch (error) {
                 console.error("Failed to decode arduino_nicla_sense_env.RxEnvelope:", error);
+              }
+              break;
+            case drivers.QueueDataType.QDT_ARDUINO_NICLA_SENSE_ME_RX:
+              try {
+                decoded = arduino_nicla_sense_me.RxEnvelope.decode(streamEntry.data);
+              } catch (error) {
+                console.error("Failed to decode arduino_nicla_sense_me.RxEnvelope:", error);
               }
               break;
             case drivers.QueueDataType.QDT_INA226_RX:
@@ -484,7 +543,7 @@ export async function parseFrame(
           return {
             queue: entry.queue,
             type: entry.type,
-            ptr: entry.ptr,
+            ptr: resolvedPtr,
             decoded,
             rawData: streamEntry.data,
             id: streamEntry.id,
@@ -585,6 +644,15 @@ export async function parseFrame(
               rawData: retainRawData ? result.rawData ?? null : null,
               queueType: result.type
             };
+            break;
+          case drivers.QueueDataType.QDT_ARDUINO_NICLA_SENSE_ME_RX:
+            frame.arduinoNiclaSenseMe!.push({
+              queueId: result.queue,
+              ptr: result.ptr,
+              data: result.decoded as arduino_nicla_sense_me.IRxEnvelope,
+              rawData: retainRawData ? result.rawData ?? null : null,
+              queueType: result.type
+            });
             break;
           case drivers.QueueDataType.QDT_INA226_RX:
             frame.ina226!.push({

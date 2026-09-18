@@ -19,6 +19,8 @@ drivers:
   yahboom-dogzilla-lite:
     enabled: true
     mode: simulation
+  arduino-nicla-sense-me:
+    enabled: true   # autodetects boards by USB vid/pid 2341:0060; each streams ~100 Hz (~2.3 GB/day) into arduino-nicla-sense-me/<serial>/rx
 inference:
 - queue-id: inference/normvla
   shm: /tmp/normvla

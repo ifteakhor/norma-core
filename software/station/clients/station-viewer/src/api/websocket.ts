@@ -1,4 +1,5 @@
 import Long from "long";
+import { LiveQueuePolicy } from "@/api/live-queue-policy";
 import { commandManager, type CommandManager } from "@/api/commands.js";
 import { parseFrame, type Frame } from "@/api/frame-parser.js";
 import { NormFsClient } from "@/api/normfs.js";
@@ -39,6 +40,7 @@ class WebSocketManager extends EventTarget {
   private historyModeLeases = new Set<symbol>();
   private acquisitionGeneration = 0;
   private pollingResumeTimeout: number | null = null;
+  private liveQueuePolicy = new LiveQueuePolicy();
   private lastProcessedEntryId: number | null = null;
 
   private liveSnapshot: LiveSnapshot = {
@@ -109,7 +111,7 @@ class WebSocketManager extends EventTarget {
     const acquisitionGeneration = this.acquisitionGeneration;
 
     try {
-      // Read the latest entry directly: backward from offset 1, limit 1
+      // Read the latest entry directly: offset 0 from the tail, limit 1.
       const entry = await this.normFs.readLastEntry('inference-states');
       const entryId = Long.fromBytesLE(Array.from(entry.id)).toNumber();
 
@@ -120,9 +122,14 @@ class WebSocketManager extends EventTarget {
         let previousFrame: Frame | undefined;
         if (this.lastProcessedEntryId !== null && this.liveSnapshot.frame !== null) {
           previousFrame = this.liveSnapshot.frame;
+          if (inferenceRx.appStartId?.toString() !== previousFrame.appStartId?.toString()) previousFrame = undefined;
         }
+        const selection = this.liveQueuePolicy.select(inferenceRx, Date.now());
         const frame = await parseFrame(inferenceRx, entry.id, this.normFs, previousFrame, {
+          queueAllowlist: selection.queues,
+          shouldReadQueue: selection.shouldRead,
           retainRawData: false,
+          thermalDiscoveryOnly: true,
           shouldLoadVideoFrame: shouldLoadLiveCameraFrame,
           shouldPublishVideoFrames: () =>
             this.isLiveMode() && acquisitionGeneration === this.acquisitionGeneration,
@@ -325,6 +332,7 @@ class WebSocketManager extends EventTarget {
       console.log("WebSocket: Connection closed.", event);
       this.acquisitionGeneration += 1;
       this.lastProcessedEntryId = null;
+      this.liveQueuePolicy.reset();
       this.frameTimestamps = [];
       this.normFs.onClose();
 

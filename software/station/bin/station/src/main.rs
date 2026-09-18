@@ -460,6 +460,35 @@ impl Station {
             log::warn!("Arduino Nicla Sense Env driver requested but is Linux-only");
         }
 
+        #[cfg(feature = "arduino")]
+        if let Some(arduino_nicla_sense_me_config) = &self.config.drivers.arduino_nicla_sense_me {
+            if arduino_nicla_sense_me_config.enabled {
+                if let Err(error) = arduino_nicla_sense_me::start_arduino_nicla_sense_me_driver(
+                    self.normfs.clone(),
+                    self.engine.clone(),
+                )
+                .await
+                {
+                    log::error!("Failed to start Arduino Nicla Sense ME driver: {}", error);
+                }
+            } else {
+                log::info!("Arduino Nicla Sense ME driver disabled by configuration");
+            }
+        }
+
+        #[cfg(not(feature = "arduino"))]
+        if self
+            .config
+            .drivers
+            .arduino_nicla_sense_me
+            .as_ref()
+            .is_some_and(|config| config.enabled)
+        {
+            log::warn!(
+                "Arduino Nicla Sense ME driver requested but not compiled (missing 'arduino' feature)"
+            );
+        }
+
         #[cfg(all(target_os = "linux", feature = "ina226"))]
         if let Some(ina226_config) = &self.config.drivers.ina226 {
             if ina226_config.enabled {
